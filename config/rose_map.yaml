@@ -14,3 +14,7 @@ occ_map:
   timeout: 1.5
   max_ray_range: 20
   unknown_is_occupied: false
+
+acc_map:
+  origin2base: 0.2
+  min_diff_z: 0.0

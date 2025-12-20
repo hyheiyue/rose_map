@@ -39,11 +39,13 @@ public:
         grid_.resize(size_t(nx_) * ny_ * nz_);
         hit_mask_.resize(grid_.size(), 0);
         free_mask_.resize(grid_.size(), 0);
+        up_mask_.resize(grid_.size(), 0);
+        down_mask_.resize(grid_.size(), 0);
 
         origin_key_ = worldToKey(origin_);
         ox_ = oy_ = oz_ = 0;
 
-        active_keys_.reserve(50000);
+        active_idx_.reserve(50000);
         hit_buffer_idx_.reserve(50000);
         free_buffer_idx_.reserve(50000);
         ray_buffer_.reserve(50000);
@@ -55,15 +57,15 @@ public:
     }
     std::vector<Eigen::Vector4f> getOccupiedPoints() const {
         std::vector<Eigen::Vector4f> pts;
-        pts.reserve(active_keys_.size());
-        for (int idx: active_keys_) {
+        pts.reserve(active_idx_.size());
+        for (int idx: active_idx_) {
             const Cell& c = grid_[idx];
             if (!c.active)
                 continue;
             if (c.log_odds <= params_.occ_th)
                 continue;
             auto p = keyToWorld(indexToKey(idx));
-            pts.emplace_back(p.x(), p.y(), p.z(), c.log_odds);
+            pts.emplace_back(p.x(), p.y(), p.z(), p.z() - origin_.z());
         }
         return pts;
     }
@@ -73,7 +75,7 @@ public:
         VoxelKey shift { new_origin.x - origin_key_.x,
                          new_origin.y - origin_key_.y,
                          new_origin.z - origin_key_.z };
-        const int min_shift = 5;
+        const int min_shift = params_.min_shift;
         if (std::abs(shift.x) < min_shift && std::abs(shift.y) < min_shift
             && std::abs(shift.z) < min_shift) {
             return;
@@ -127,9 +129,7 @@ public:
         commitFree(t);
         commitHits(t);
     }
-
-    bool isOccupied(const Eigen::Vector3f& p, Clock now) const {
-        int idx = keyToIndex(worldToKey(p));
+    bool isOccupied(int idx, Clock now) const {
         if (idx < 0)
             return params_.unknown_is_occupied;
 
@@ -139,14 +139,28 @@ public:
 
         return c.log_odds > params_.occ_th;
     }
+    bool isOccupied(const VoxelKey& k, Clock now) const {
+        int idx = keyToIndex(k);
+        return isOccupied(idx, now);
+    }
+    bool isOccupied(const Eigen::Vector3f& p, Clock now) const {
+        VoxelKey k = worldToKey(p);
+        return isOccupied(k, now);
+    }
     void update(Clock now) {
         decayActive(now);
+        now_ = now;
+    }
+    void updateEnd() {
+        up_buffer_idx_.clear();
+        down_buffer_idx_.clear();
+        std::fill(up_mask_.begin(), up_mask_.end(), 0);
+        std::fill(down_mask_.begin(), down_mask_.end(), 0);
     }
     Eigen::Vector3f origin() const {
         return origin_;
     }
 
-private:
     struct Cell {
         float log_odds = 0.f;
         Clock last_update = 0.0;
@@ -159,7 +173,6 @@ private:
 
     struct RayKeyHash {
         size_t operator()(const RayKey& r) const noexcept {
-            // 64-bit 混合 hash
             size_t h1 = ((uint64_t)(r.o.x & 0x1FFFFF) << 42) | ((uint64_t)(r.o.y & 0x1FFFFF) << 21)
                 | ((uint64_t)(r.o.z & 0x1FFFFF));
             size_t h2 = ((uint64_t)(r.h.x & 0x1FFFFF) << 42) | ((uint64_t)(r.h.y & 0x1FFFFF) << 21)
@@ -240,6 +253,8 @@ private:
                 grid_[idx] = Cell();
                 hit_mask_[idx] = 0;
                 free_mask_[idx] = 0;
+                up_mask_[idx] = 0;
+                down_mask_[idx] = 0;
             }
     }
 
@@ -247,12 +262,17 @@ private:
         std::fill(grid_.begin(), grid_.end(), Cell());
         std::fill(hit_mask_.begin(), hit_mask_.end(), 0);
         std::fill(free_mask_.begin(), free_mask_.end(), 0);
-        active_keys_.clear();
+        std::fill(up_mask_.begin(), up_mask_.end(), 0);
+        std::fill(down_mask_.begin(), down_mask_.end(), 0);
+        active_idx_.clear();
     }
 
     void markHitWithNeighbors(const VoxelKey& k) {
-        static const int neigh[7][3] = { { 0, 0, 0 }, { -1, 0, 0 }, { 1, 0, 0 }, { 0, -1, 0 },
-                                         { 0, 1, 0 }, { 0, 0, -1 }, { 0, 0, 1 } };
+        static const int neigh[5][3] = { { 0, 0, 0 },
+                                         { -1, 0, 0 },
+                                         { 1, 0, 0 },
+                                         { 0, -1, 0 },
+                                         { 0, 1, 0 } };
 
         for (auto& d: neigh) {
             int idx = keyToIndex({ k.x + d[0], k.y + d[1], k.z + d[2] });
@@ -262,16 +282,33 @@ private:
             hit_buffer_idx_.push_back(idx);
         }
     }
+    void trackState(bool was_occ, bool now_occ, int idx) {
+        if (!was_occ && now_occ) {
+            if (idx >= 0 && !up_mask_[idx]) {
+                up_buffer_idx_.push_back(idx);
+                up_mask_[idx] = 1;
+            }
+        }
+        if (was_occ && !now_occ) {
+            if (idx >= 0 && !down_mask_[idx]) {
+                down_buffer_idx_.push_back(idx);
+                down_mask_[idx] = 1;
+            }
+        }
+    }
 
     void commitHits(Clock t) {
         for (int idx: hit_buffer_idx_) {
             Cell& c = grid_[idx];
+            bool was_occ = isOccupied(idx, t);
             c.log_odds = std::min(c.log_odds + params_.log_hit, params_.log_max);
             c.last_update = t;
             if (!c.active) {
                 c.active = true;
-                active_keys_.push_back(idx);
+                active_idx_.push_back(idx);
             }
+            bool now_occ = isOccupied(idx, t);
+            trackState(was_occ, now_occ, idx);
             hit_mask_[idx] = 0;
         }
         hit_buffer_idx_.clear();
@@ -280,28 +317,34 @@ private:
     void commitFree(Clock t) {
         for (int idx: free_buffer_idx_) {
             Cell& c = grid_[idx];
+            bool was_occ = isOccupied(idx, t);
             c.log_odds = std::max(c.log_odds + params_.log_free, params_.log_min);
             c.last_update = t;
             if (!c.active) {
                 c.active = true;
-                active_keys_.push_back(idx);
+                active_idx_.push_back(idx);
             }
+            bool now_occ = isOccupied(idx, t);
+            trackState(was_occ, now_occ, idx);
             free_mask_[idx] = 0;
         }
         free_buffer_idx_.clear();
     }
     void decayActive(Clock now) {
-        for (size_t i = 0; i < active_keys_.size();) {
-            int idx = active_keys_[i];
+        for (size_t i = 0; i < active_idx_.size();) {
+            int idx = active_idx_[i];
             Cell& c = grid_[idx];
+            bool was_occ = isOccupied(idx, now);
             c.log_odds = std::max(
                 c.log_odds + float(params_.log_decay * (now - last_decay_)),
                 params_.log_min
             );
+            bool now_occ = isOccupied(idx, now);
+            trackState(was_occ, now_occ, idx);
             if (now - c.last_update > params_.timeout) {
                 c.active = false;
-                active_keys_[i] = active_keys_.back();
-                active_keys_.pop_back();
+                active_idx_[i] = active_idx_.back();
+                active_idx_.pop_back();
             } else {
                 ++i;
             }
@@ -371,7 +414,6 @@ private:
         return ds > 0 ? (std::floor(s + 1) - s) / ds : (s - std::floor(s)) / -ds;
     }
 
-private:
     float voxel_size_;
     Eigen::Vector3f origin_, size_;
 
@@ -384,15 +426,20 @@ private:
     int ox_, oy_, oz_;
 
     // buffers
-    std::vector<int> active_keys_;
+    std::vector<int> active_idx_;
     std::vector<int> hit_buffer_idx_;
     std::vector<int> free_buffer_idx_;
+    std::vector<int> up_buffer_idx_;
+    std::vector<int> down_buffer_idx_;
     std::vector<uint8_t> hit_mask_;
     std::vector<uint8_t> free_mask_;
+    std::vector<uint8_t> up_mask_;
+    std::vector<uint8_t> down_mask_;
     std::vector<RayKey> ray_buffer_;
     ankerl::unordered_dense::set<RayKey, RayKeyHash, RayKeyEq> ray_set_;
     VoxelKey min_key_, max_key_;
     Clock last_decay_ = 0.0;
+    Clock now_;
     struct Params {
         float log_hit = 0.85f;
         float log_free = -0.4f;

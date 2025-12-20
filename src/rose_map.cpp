@@ -1,4 +1,4 @@
-#include "occ_map.hpp"
+#include "acc_map.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include <nav_msgs/msg/odometry.hpp>
@@ -13,7 +13,7 @@ public:
         tf_buffer_(this->get_clock()) {
         RCLCPP_INFO(this->get_logger(), "RoseMapNode has been started.");
         YAML::Node config = YAML::LoadFile("/home/hy/wust_nav2/src/rose_map/config/rose_map.yaml");
-        occ_map_ = OccMap::create(config["occ_map"]);
+        acc_map_ = AccMap::create(config);
 
         pointcloud_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
             "/cloud_registered",
@@ -63,11 +63,12 @@ public:
                 "[OccMap] TF lookup failed (%s)",
                 msg->header.frame_id.c_str()
             );
-            sensor_origin = occ_map_->origin();
+            sensor_origin = acc_map_->origin();
         }
 
-        occ_map_->insertPointCloud(pts, sensor_origin, current_time_);
-        occ_map_->update(current_time_);
+        acc_map_->insertPointCloud(pts, sensor_origin, current_time_);
+        acc_map_->update(current_time_);
+        acc_map_->updateEnd();
         sensor_msgs::msg::PointCloud2 occ_msg;
         occ_msg.header = msg->header;
         pubOccPointcloud(current_time_, occ_msg);
@@ -83,7 +84,7 @@ public:
         if (current_time_ - last_report_time_ >= 1.0) {
             RCLCPP_INFO(
                 this->get_logger(),
-                "[OccMap+Dynamic] %.2f ms/s, avg %.3f ms (%zu calls)",
+                "[OccMap] %.2f ms/s, avg %.3f ms (%zu calls)",
                 occ_cost_accum_,
                 occ_cost_accum_ / std::max<size_t>(1, occ_call_count_),
                 occ_call_count_
@@ -114,7 +115,7 @@ public:
 
     void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
         auto odom = *msg;
-        occ_map_->setOrigin(Eigen::Vector3f(
+        acc_map_->setOrigin(Eigen::Vector3f(
             odom.pose.pose.position.x,
             odom.pose.pose.position.y,
             odom.pose.pose.position.z
@@ -124,7 +125,7 @@ public:
         if (occ_map_pub_->get_subscription_count() < 1) {
             return;
         }
-        auto all = occ_map_->getOccupiedPoints();
+        auto all = acc_map_->getOccupiedPoints();
         occ_msg.height = 1;
         occ_msg.width = all.size();
         occ_msg.fields.resize(4);
@@ -160,7 +161,7 @@ public:
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_sub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr occ_map_pub_;
-    OccMap::Ptr occ_map_;
+    AccMap::Ptr acc_map_;
     Clock current_time_ = 0.0;
     tf2_ros::Buffer tf_buffer_;
     tf2_ros::TransformListener tf_listener_ { tf_buffer_ };
