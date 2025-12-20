@@ -1,0 +1,16 @@
+occ_map:
+  voxel_size: 0.05
+  origin: [0.0, 0.0, 0.0]
+  size: [12.0, 12.0, 1.0]
+  log_hit: 0.85
+  log_free: -0.4
+
+  log_min: -5
+  log_max: 5
+
+  occ_th: 1.0        # ≈ P > 0.77
+  free_th: -1.0      # ≈ P < 0.27
+  min_shift: 2
+  timeout: 1.5
+  max_ray_range: 20
+  unknown_is_occupied: false
