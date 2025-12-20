@@ -41,6 +41,7 @@ public:
         free_mask_.resize(grid_.size(), 0);
         up_mask_.resize(grid_.size(), 0);
         down_mask_.resize(grid_.size(), 0);
+        ray_mask_.resize(grid_.size(), 0);
 
         origin_key_ = worldToKey(origin_);
         ox_ = oy_ = oz_ = 0;
@@ -48,8 +49,8 @@ public:
         active_idx_.reserve(50000);
         hit_buffer_idx_.reserve(50000);
         free_buffer_idx_.reserve(50000);
-        ray_buffer_.reserve(50000);
-        ray_set_.reserve(50000);
+        ray_buffer_idx_.reserve(50000);
+        
     }
 
     static Ptr create(const YAML::Node& config) {
@@ -102,11 +103,10 @@ public:
         Clock t
     ) {
         const float max_r2 = params_.max_ray_range * params_.max_ray_range;
-        ray_set_.clear();
-        ray_buffer_.clear();
+        ray_buffer_idx_.clear();
         hit_buffer_idx_.clear();
         free_buffer_idx_.clear();
-
+        const VoxelKey sensor_key = worldToKey(sensor_origin);
         for (const auto& p: pts) {
             if ((p - sensor_origin).squaredNorm() > max_r2)
                 continue;
@@ -115,15 +115,18 @@ public:
             int hit_idx = keyToIndex(k_hit);
             if (hit_idx < 0)
                 continue;
-            const VoxelKey sensor_key = worldToKey(sensor_origin);
+            
             RayKey ray { sensor_key, k_hit };
-            if (ray_set_.insert(ray).second) {
-                ray_buffer_.push_back(ray);
+            if (!ray_mask_[hit_idx]) {
+                ray_buffer_idx_.push_back(hit_idx);
+                ray_mask_[hit_idx] = 1;
             }
             markHitWithNeighbors(k_hit);
         }
-        for (const auto& ray: ray_buffer_) {
-            raycastFreeKey(ray.o, ray.h);
+        for (const auto& idx: ray_buffer_idx_) {
+            auto key = indexToKey(idx);
+            raycastFreeKey(sensor_key,key);
+            ray_mask_[idx] = 0;
         }
 
         commitFree(t);
@@ -431,12 +434,15 @@ public:
     std::vector<int> free_buffer_idx_;
     std::vector<int> up_buffer_idx_;
     std::vector<int> down_buffer_idx_;
+    std::vector<int> ray_buffer_idx_;
+
     std::vector<uint8_t> hit_mask_;
     std::vector<uint8_t> free_mask_;
     std::vector<uint8_t> up_mask_;
     std::vector<uint8_t> down_mask_;
-    std::vector<RayKey> ray_buffer_;
-    ankerl::unordered_dense::set<RayKey, RayKeyHash, RayKeyEq> ray_set_;
+    std::vector<uint8_t> ray_mask_;
+    
+    
     VoxelKey min_key_, max_key_;
     Clock last_decay_ = 0.0;
     Clock now_;
