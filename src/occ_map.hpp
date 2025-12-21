@@ -4,14 +4,20 @@
 #include "rose_map/common.hpp"
 #include "rose_map/yaml_eigen.hpp"
 
+#include "execution"
 #include <Eigen/Core>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <iostream>
 #include <limits>
 #include <memory>
+#include <tbb/blocked_range.h>
+#include <tbb/enumerable_thread_specific.h>
+#include <tbb/parallel_for.h>
+#include <tbb/parallel_invoke.h>
+#include <thread>
 #include <vector>
-
 namespace rose_map {
 
 struct VoxelKey3D {
@@ -25,7 +31,7 @@ struct VoxelKey3D {
  */
 struct StampedIndexBuffer {
     std::vector<int> indices;
-    std::vector<uint32_t> stamp ;
+    std::vector<uint32_t> stamp;
     inline void tryPush(int idx, uint32_t now) {
         if (stamp[idx] != now) {
             stamp[idx] = now;
@@ -59,12 +65,9 @@ public:
         const size_t N = size_t(nx_) * ny_ * nz_;
         grid_.resize(N);
 
-
-        hit_buf_.stamp.resize(N,0);
-        free_buf_.stamp.resize(N,0);
-        up_buf_.stamp.resize(N,0);
-        down_buf_.stamp.resize(N,0);
-        ray_buf_.stamp.resize(N,0);
+        hit_buf_.stamp.resize(N, 0);
+        free_buf_.stamp.resize(N, 0);
+        ray_buf_.stamp.resize(N, 0);
 
         origin_key_ = worldToKey3D(origin_);
         ox_ = oy_ = oz_ = 0;
@@ -81,8 +84,6 @@ public:
         Clock last_update = 0.0;
     };
 
-    // ======================== Public API ========================
-
     void insertPointCloud(
         const std::vector<Eigen::Vector3f>& pts,
         const Eigen::Vector3f& sensor_origin,
@@ -92,34 +93,69 @@ public:
 
         hit_buf_.clear();
         free_buf_.clear();
-        up_buf_.clear();
-        down_buf_.clear();
         ray_buf_.clear();
 
         const float max_r2 = params_.max_ray_range * params_.max_ray_range;
         const VoxelKey3D sensor_key = worldToKey3D(sensor_origin);
+        struct LocalBuf {
+            std::vector<int> ray;
+            std::vector<int> hit;
+        };
 
-        for (const auto& p: pts) {
-            if ((p - sensor_origin).squaredNorm() > max_r2)
-                continue;
+        tbb::enumerable_thread_specific<LocalBuf> tls;
 
-            VoxelKey3D k_hit = worldToKey3D(p);
-            int hit_idx = key3DToIndex3D(k_hit);
-            if (hit_idx < 0)
-                continue;
+        tbb::parallel_for(
+            tbb::blocked_range<size_t>(0, pts.size()),
+            [&](const tbb::blocked_range<size_t>& r) {
+                auto& local = tls.local();
 
-            ray_buf_.tryPush(hit_idx, stamp_now_);
-            markHitWithNeighbors(k_hit);
+                for (size_t i = r.begin(); i < r.end(); ++i) {
+                    const auto& p = pts[i];
+                    if ((p - sensor_origin).squaredNorm() > max_r2)
+                        continue;
+
+                    VoxelKey3D k_hit = worldToKey3D(p);
+                    int hit_idx = key3DToIndex3D(k_hit);
+                    if (hit_idx < 0)
+                        continue;
+                    if (params_.use_ray) {
+                        local.ray.push_back(hit_idx);
+                    }
+
+                    static const int d[5][3] = { { 0, 0, 0 },
+                                                 { -1, 0, 0 },
+                                                 { 1, 0, 0 },
+                                                 { 0, -1, 0 },
+                                                 { 0, 1, 0 } };
+
+                    for (auto& n: d) {
+                        int idx =
+                            key3DToIndex3D({ k_hit.x + n[0], k_hit.y + n[1], k_hit.z + n[2] });
+                        if (idx >= 0)
+                            local.hit.push_back(idx);
+                    }
+                }
+            }
+        );
+
+        for (auto& local: tls) {
+            if (params_.use_ray) {
+                for (int idx: local.ray)
+                    ray_buf_.tryPush(idx, stamp_now_);
+            }
+            for (int idx: local.hit)
+                hit_buf_.tryPush(idx, stamp_now_);
         }
 
-        for (int idx: ray_buf_.indices)
-            raycastFreeKey(sensor_key, index3DToKey3D(idx));
+        if (params_.use_ray) {
+            for (int idx: ray_buf_.indices)
+                raycastFreeKey(sensor_key, index3DToKey3D(idx));
+        }
 
-        commitFree(t);
-        commitHits(t);
+        tbb::parallel_invoke([&] { commitFree(t); }, [&] { commitHits(t); });
     }
 
-    bool isOccupied(int idx, Clock now) const {
+    inline bool isOccupied(int idx, Clock now) const {
         if (idx < 0)
             return params_.unknown_is_occupied;
 
@@ -132,12 +168,26 @@ public:
 
     void update(Clock now) {
         now_ = now;
-        occupied_buffer_idx_.clear();
-        for (int i = 0; i < grid_.size(); ++i) {
+
+        const int N = static_cast<int>(grid_.size());
+
+        tbb::enumerable_thread_specific<std::vector<int>> tls;
+
+        tbb::parallel_for(0, N, [&](int i) {
             if (isOccupied(i, now_))
-                occupied_buffer_idx_.push_back(i);
-        }
+                tls.local().push_back(i);
+        });
+
+        occupied_buffer_idx_.clear();
+        size_t total = 0;
+        for (auto& v: tls)
+            total += v.size();
+
+        occupied_buffer_idx_.reserve(total);
+        for (auto& v: tls)
+            occupied_buffer_idx_.insert(occupied_buffer_idx_.end(), v.begin(), v.end());
     }
+
     Eigen::Vector3f origin() const {
         return origin_;
     }
@@ -146,7 +196,7 @@ public:
         pts.reserve(occupied_buffer_idx_.size());
         for (int idx: occupied_buffer_idx_) {
             const Cell& c = grid_[idx];
-            if (c.log_odds <= params_.occ_th)
+            if (!isOccupied(idx, now_))
                 continue;
             auto p = key3DToWorld(index3DToKey3D(idx));
             pts.emplace_back(p.x(), p.y(), p.z(), p.z() - origin_.z());
@@ -201,16 +251,13 @@ public:
                 else
                     idx = (i * ny_ + j) * nz_ + slice;
                 grid_[idx] = Cell();
-                hit_buf_.stamp[idx] = free_buf_.stamp[idx] = up_buf_.stamp[idx] = down_buf_.stamp[idx] =
-                    ray_buf_.stamp[idx] = 0;
+                hit_buf_.stamp[idx] = free_buf_.stamp[idx] = ray_buf_.stamp[idx] = 0;
             }
     }
     void resetAll() {
         std::fill(grid_.begin(), grid_.end(), Cell());
         std::fill(hit_buf_.stamp.begin(), hit_buf_.stamp.end(), 0);
         std::fill(free_buf_.stamp.begin(), free_buf_.stamp.end(), 0);
-        std::fill(up_buf_.stamp.begin(), up_buf_.stamp.end(), 0);
-        std::fill(down_buf_.stamp.begin(), down_buf_.stamp.end(), 0);
         std::fill(ray_buf_.stamp.begin(), ray_buf_.stamp.end(), 0);
     }
 
@@ -229,10 +276,10 @@ public:
     }
 
     void trackState(bool was, bool now, int idx) {
-        if (!was && now)
-            up_buf_.tryPush(idx, stamp_now_);
-        else if (was && !now)
-            down_buf_.tryPush(idx, stamp_now_);
+        // if (!was && now)
+        //     up_buf_.tryPush(idx, stamp_now_);
+        // else if (was && !now)
+        //     down_buf_.tryPush(idx, stamp_now_);
     }
 
     void commitHits(Clock t) {
@@ -345,7 +392,6 @@ public:
         return Eigen::Vector3f(k.x, k.y, k.z) * voxel_size_;
     }
 
-
     float voxel_size_;
     Eigen::Vector3f origin_, size_;
 
@@ -357,8 +403,7 @@ public:
 
     std::vector<int> occupied_buffer_idx_;
 
-
-    StampedIndexBuffer hit_buf_, free_buf_, up_buf_, down_buf_, ray_buf_;
+    StampedIndexBuffer hit_buf_, free_buf_, ray_buf_;
 
     uint32_t stamp_now_ = 1;
     VoxelKey3D min_key_, max_key_;
@@ -374,6 +419,7 @@ public:
         double timeout = 0.8;
         double max_ray_range = 20.0;
         bool unknown_is_occupied = false;
+        bool use_ray = true;
 
         void load(const YAML::Node& c) {
             if (c["log_hit"])
@@ -394,6 +440,8 @@ public:
                 max_ray_range = c["max_ray_range"].as<double>();
             if (c["unknown_is_occupied"])
                 unknown_is_occupied = c["unknown_is_occupied"].as<bool>();
+            if (c["use_ray"])
+                use_ray = c["use_ray"].as<bool>();
         }
     } params_;
 };

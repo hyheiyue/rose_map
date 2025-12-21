@@ -71,7 +71,14 @@ public:
         }
 
         esdf_->insertPointCloud(pts, sensor_origin, current_time_);
-        esdf_->update(current_time_);
+        static auto last_esdf_update = std::chrono::steady_clock::now();
+
+        const auto now_sys = std::chrono::steady_clock::now();
+
+        if (std::chrono::duration<double>(now_sys - last_esdf_update).count() >= 0.1) {
+            esdf_->update(current_time_);
+            last_esdf_update = now_sys;
+        }
         if (publisherSubscribed(occ_map_pub_)) {
             sensor_msgs::msg::PointCloud2 occ_msg;
             occ_msg.header = msg->header;

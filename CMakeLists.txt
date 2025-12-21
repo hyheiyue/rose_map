@@ -22,6 +22,8 @@ find_package(nav_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(yaml-cpp REQUIRED)
+find_package(TBB REQUIRED)
+
 ament_auto_add_library(${PROJECT_NAME} SHARED ${SOURCE})
 target_include_directories(${PROJECT_NAME} PUBLIC
     include
@@ -33,6 +35,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
 target_link_libraries(${PROJECT_NAME}
     Eigen3::Eigen
     yaml-cpp
+    TBB::tbb
 )
 ament_target_dependencies(${PROJECT_NAME}
     rclcpp

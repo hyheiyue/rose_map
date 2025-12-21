@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <iostream>
 #include <vector>
 
 namespace rose_map {
@@ -44,20 +45,16 @@ public:
     }
 
     inline int key2DToIndex2D(const VoxelKey2D& k) const {
-        // Convert world-aligned key to local grid coordinates
         int dx = k.x - origin_key_.x + nx_ / 2;
         int dy = k.y - origin_key_.y + ny_ / 2;
 
-        // Boundary check
         if ((unsigned)dx >= (unsigned)nx_ || (unsigned)dy >= (unsigned)ny_) {
             return -1;
         }
 
-        // Ring buffer remapping
         int rx = (dx + ox_) % nx_;
         int ry = (dy + oy_) % ny_;
 
-        // Row-major layout
         return rx + ry * nx_;
     }
 
@@ -71,7 +68,6 @@ public:
         return { origin_key_.x + dx - nx_ / 2, origin_key_.y + dy - ny_ / 2 };
     }
 
-    // World (x,y) -> 2D voxel key
     inline VoxelKey2D worldToKey2D(const Eigen::Vector2f& p) const {
         Eigen::Vector2f q = p / voxel_size_;
         return { static_cast<int>(std::floor(q.x())), static_cast<int>(std::floor(q.y())) };
@@ -83,43 +79,61 @@ public:
         p.z() = getRoboBase().z();
         return p;
     }
-
-    void trackPassable(bool was_passable, bool now_passable, int idx) {
-        if (was_passable && !now_passable) {
-            upper_idx_.push_back(idx);
-        }
-        if (!was_passable && now_passable) {
-            lower_idx_.push_back(idx);
-        }
+    inline bool isPassableCached(int idx, const Eigen::Vector3f& robo_base) const {
+        const Cell& c = grid_[idx];
+        if (!isOccupied(idx, now_))
+            return true;
+        Eigen::Vector3f p = key3DToWorld(index3DToKey3D(idx));
+        Eigen::Vector3f diff = p - robo_base;
+        if (diff.z() < params_.min_diff_z)
+            return true;
+        return false;
     }
-
     void update(Clock now) {
         OccMap::update(now);
+
         upper_idx_.clear();
         lower_idx_.clear();
-        const int size2d = nx_ * ny_;
 
+        const int size2d = nx_ * ny_;
         std::vector<uint8_t>* other = (curr_ == &buf0_) ? &buf1_ : &buf0_;
 
         std::fill(other->begin(), other->end(), static_cast<uint8_t>(1));
 
+        std::vector<int> block_cnt(size2d, 0);
+
         const Eigen::Vector3f robo_base = getRoboBase();
-        const float occ_th = OccMap::params_.occ_th;
 
         for (int idx3d: occupied_buffer_idx_) {
+            if (!isOccupied(idx3d, now))
+                continue;
+
             VoxelKey3D k3 = index3DToKey3D(idx3d);
             VoxelKey2D k2 { k3.x, k3.y };
             int idx2d = key2DToIndex2D(k2);
             if (idx2d < 0)
                 continue;
-
-            (*other)[idx2d] = isPassableCached(idx3d, robo_base, occ_th) ? 1 : 0;
+            if (!isPassableCached(idx3d, robo_base)) {
+                block_cnt[idx2d]++;
+            }
         }
 
-        upper_idx_.clear();
-        lower_idx_.clear();
-        upper_idx_.reserve(upper_idx_.capacity());
-        lower_idx_.reserve(lower_idx_.capacity());
+        for (int i = 0; i < size2d; ++i) {
+            bool blocked = false;
+
+            if (block_cnt[i] >= params_.min_block_count)
+                blocked = true;
+            if (params_.block_ratio > 0.0f) {
+                float ratio = static_cast<float>(block_cnt[i]) / static_cast<float>(nz_);
+                if (ratio >= params_.block_ratio) {
+                    blocked = true;
+                } else {
+                    blocked = false;
+                }
+            }
+
+            (*other)[i] = blocked ? 0 : 1;
+        }
 
         for (int i = 0; i < size2d; ++i) {
             bool was_passable = ((*curr_)[i] != 0);
@@ -134,28 +148,12 @@ public:
         curr_ = other;
     }
 
-    inline bool isPassableCached(int idx, const Eigen::Vector3f& robo_base, float occ_th) const {
-        const Cell& c = grid_[idx];
-
-        if (!isOccupied(idx, now_))
-            return true;
-
-        Eigen::Vector3f p = key3DToWorld(index3DToKey3D(idx));
-        Eigen::Vector3f diff = p - robo_base;
-
-        if (diff.z() < params_.min_diff_z)
-            return true;
-
-        return false;
-    }
-
     std::vector<Eigen::Vector4f> getOccupiedPoints() const {
         std::vector<Eigen::Vector4f> pts;
         pts.reserve(nx_ * ny_ / 8 + 16);
 
-        // 遍历 in index order
         for (int i = 0; i < static_cast<int>(curr_->size()); ++i) {
-            if ((*curr_)[i] == 0) { // 0 => blocked / occupied
+            if ((*curr_)[i] == 0) {
                 VoxelKey2D key2d = index2DToKey2D(i);
                 Eigen::Vector3f p = key2DToWorld(key2d);
                 pts.emplace_back(p.x(), p.y(), p.z(), 0.0f);
@@ -172,9 +170,14 @@ public:
         float origin2base { 0.0f };
         float min_diff_z { 0.0f };
 
+        int min_block_count { 1 };
+        float block_ratio { 0.4f };
+
         void load(const YAML::Node& config) {
             origin2base = config["origin2base"].as<float>();
             min_diff_z = config["min_diff_z"].as<float>();
+            min_block_count = config["min_block_count"].as<int>(1);
+            block_ratio = config["block_ratio"].as<float>(0.0f);
         }
     } params_;
 
@@ -187,13 +190,10 @@ public:
     }
 
 private:
-    // 双缓冲真实数据存储
     std::vector<uint8_t> buf0_;
     std::vector<uint8_t> buf1_;
-    // 指向当前帧有效缓冲区
     std::vector<uint8_t>* curr_ { nullptr };
 
-    // 为兼容原接口，保留变化索引
     std::vector<int> upper_idx_;
     std::vector<int> lower_idx_;
 };

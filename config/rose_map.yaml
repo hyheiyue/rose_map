@@ -1,5 +1,5 @@
 occ_map:
-  voxel_size: 0.05
+  voxel_size: 0.02
   origin: [0.0, 0.0, 0.0]
   size: [12.0, 12.0, 1.0]
   log_hit: 0.85
@@ -14,7 +14,11 @@ occ_map:
   timeout: 1.5
   max_ray_range: 20
   unknown_is_occupied: false
+  use_ray: false
 
 acc_map:
   origin2base: 0.2
-  min_diff_z: 0.0
+  min_diff_z: -0.16
+  min_block_count: 1
+  block_ratio: 0.1
+  
