@@ -1,4 +1,4 @@
-#include "acc_map.hpp"
+#include "esdf.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include <nav_msgs/msg/odometry.hpp>
@@ -13,7 +13,7 @@ public:
         tf_buffer_(this->get_clock()) {
         RCLCPP_INFO(this->get_logger(), "RoseMapNode has been started.");
         YAML::Node config = YAML::LoadFile("/home/hy/wust_nav2/src/rose_map/config/rose_map.yaml");
-        acc_map_ = AccMap::create(config);
+        esdf_ = ESDF::create(config);
 
         pointcloud_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
             "/cloud_registered",
@@ -27,6 +27,10 @@ public:
         );
         occ_map_pub_ =
             this->create_publisher<sensor_msgs::msg::PointCloud2>("occ_map_out", rclcpp::QoS(10));
+        acc_map_pub_ =
+            this->create_publisher<sensor_msgs::msg::PointCloud2>("acc_map_out", rclcpp::QoS(10));
+        esdf_map_pub_ =
+            this->create_publisher<sensor_msgs::msg::PointCloud2>("esdf_out", rclcpp::QoS(10));
     }
     double occ_cost_accum_ = 0.0;
     size_t occ_call_count_ = 0;
@@ -63,15 +67,32 @@ public:
                 "[OccMap] TF lookup failed (%s)",
                 msg->header.frame_id.c_str()
             );
-            sensor_origin = acc_map_->origin();
+            sensor_origin = esdf_->origin();
         }
 
-        acc_map_->insertPointCloud(pts, sensor_origin, current_time_);
-        acc_map_->update(current_time_);
-        acc_map_->updateEnd();
-        sensor_msgs::msg::PointCloud2 occ_msg;
-        occ_msg.header = msg->header;
-        pubOccPointcloud(current_time_, occ_msg);
+        esdf_->insertPointCloud(pts, sensor_origin, current_time_);
+        esdf_->update(current_time_);
+        esdf_->updateEnd();
+        if (publisherSubscribed(occ_map_pub_)) {
+            sensor_msgs::msg::PointCloud2 occ_msg;
+            occ_msg.header = msg->header;
+            auto cloud = esdf_->OccMap::getOccupiedPoints();
+            pubPointcloud(cloud, occ_msg, occ_map_pub_);
+        }
+        if (publisherSubscribed(acc_map_pub_)) {
+            sensor_msgs::msg::PointCloud2 acc_msg;
+            acc_msg.header = msg->header;
+            auto cloud = esdf_->AccMap::getOccupiedPoints();
+            pubPointcloud(cloud, acc_msg, acc_map_pub_);
+        }
+        if (publisherSubscribed(esdf_map_pub_)) {
+            sensor_msgs::msg::PointCloud2 esdf_msg;
+            esdf_msg.header = msg->header;
+            auto cloud = esdf_->ESDF::getOccupiedPoints();
+            pubPointcloud(cloud, esdf_msg, esdf_map_pub_);
+        }
+
+        // pubOccPointcloud(current_time_, msg);
         const auto t1 = std::chrono::steady_clock::now();
         const double cost_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
@@ -115,53 +136,62 @@ public:
 
     void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
         auto odom = *msg;
-        acc_map_->setOrigin(Eigen::Vector3f(
+        esdf_->setOrigin(Eigen::Vector3f(
             odom.pose.pose.position.x,
             odom.pose.pose.position.y,
             odom.pose.pose.position.z
         ));
     }
-    void pubOccPointcloud(Clock time, sensor_msgs::msg::PointCloud2& occ_msg) {
-        if (occ_map_pub_->get_subscription_count() < 1) {
+    bool publisherSubscribed(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher
+    ) {
+        return publisher->get_subscription_count() > 0;
+    }
+    void pubPointcloud(
+        const std::vector<Eigen::Vector4f> all,
+        sensor_msgs::msg::PointCloud2& msg,
+        rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher
+    ) {
+        if (!publisherSubscribed(publisher)) {
             return;
         }
-        auto all = acc_map_->getOccupiedPoints();
-        occ_msg.height = 1;
-        occ_msg.width = all.size();
-        occ_msg.fields.resize(4);
-        occ_msg.fields[0].name = "x";
-        occ_msg.fields[0].offset = 0;
-        occ_msg.fields[0].datatype = sensor_msgs::msg::PointField::FLOAT32;
-        occ_msg.fields[0].count = 1;
-        occ_msg.fields[1].name = "y";
-        occ_msg.fields[1].offset = 4;
-        occ_msg.fields[1].datatype = sensor_msgs::msg::PointField::FLOAT32;
-        occ_msg.fields[1].count = 1;
-        occ_msg.fields[2].name = "z";
-        occ_msg.fields[2].offset = 8;
-        occ_msg.fields[2].datatype = sensor_msgs::msg::PointField::FLOAT32;
-        occ_msg.fields[2].count = 1;
-        occ_msg.fields[3].name = "intensity";
-        occ_msg.fields[3].offset = 12;
-        occ_msg.fields[3].datatype = sensor_msgs::msg::PointField::FLOAT32;
-        occ_msg.fields[3].count = 1;
-        occ_msg.is_bigendian = false;
-        occ_msg.point_step = 16;
-        occ_msg.row_step = occ_msg.point_step * occ_msg.width;
-        occ_msg.data.resize(occ_msg.row_step * occ_msg.height);
+        msg.height = 1;
+        msg.width = all.size();
+        msg.fields.resize(4);
+        msg.fields[0].name = "x";
+        msg.fields[0].offset = 0;
+        msg.fields[0].datatype = sensor_msgs::msg::PointField::FLOAT32;
+        msg.fields[0].count = 1;
+        msg.fields[1].name = "y";
+        msg.fields[1].offset = 4;
+        msg.fields[1].datatype = sensor_msgs::msg::PointField::FLOAT32;
+        msg.fields[1].count = 1;
+        msg.fields[2].name = "z";
+        msg.fields[2].offset = 8;
+        msg.fields[2].datatype = sensor_msgs::msg::PointField::FLOAT32;
+        msg.fields[2].count = 1;
+        msg.fields[3].name = "intensity";
+        msg.fields[3].offset = 12;
+        msg.fields[3].datatype = sensor_msgs::msg::PointField::FLOAT32;
+        msg.fields[3].count = 1;
+        msg.is_bigendian = false;
+        msg.point_step = 16;
+        msg.row_step = msg.point_step * msg.width;
+        msg.data.resize(msg.row_step * msg.height);
         for (size_t i = 0; i < all.size(); ++i) {
-            float* data_ptr = reinterpret_cast<float*>(&occ_msg.data[i * occ_msg.point_step]);
+            float* data_ptr = reinterpret_cast<float*>(&msg.data[i * msg.point_step]);
             data_ptr[0] = all[i][0];
             data_ptr[1] = all[i][1];
             data_ptr[2] = all[i][2];
             data_ptr[3] = all[i][3];
         }
-        occ_map_pub_->publish(occ_msg);
+        publisher->publish(msg);
     }
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_sub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr occ_map_pub_;
-    AccMap::Ptr acc_map_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr acc_map_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr esdf_map_pub_;
+    ESDF::Ptr esdf_;
     Clock current_time_ = 0.0;
     tf2_ros::Buffer tf_buffer_;
     tf2_ros::TransformListener tf_listener_ { tf_buffer_ };
