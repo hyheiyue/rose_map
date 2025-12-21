@@ -22,8 +22,8 @@ public:
     void update(Clock now) {
         AccMap::update(now);
 
-        std::fill(esdf_.begin(), esdf_.end(), kInf);
-        computeESDF();
+        // std::fill(esdf_.begin(), esdf_.end(), kInf);
+        // computeESDF();
     }
 
     float getDistance(const VoxelKey2D& key) const {
@@ -70,8 +70,7 @@ private:
         std::priority_queue<Node> pq;
 
         const int size2d = nx_ * ny_;
-        const auto& acc = acc_grid_view(); 
-
+        const auto& acc = acc_grid_view();
 
         for (int idx = 0; idx < size2d; ++idx) {
             if (acc[idx] == 0) { // occupied/obstacle
@@ -93,7 +92,6 @@ private:
 
             int cur_idx = cur.idx;
             float cur_dist = cur.dist;
-
 
             if (cur_dist > esdf_[cur_idx])
                 continue;

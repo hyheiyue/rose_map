@@ -8,7 +8,7 @@ occ_map:
   log_min: -5
   log_max: 5
 
-  occ_th: 1.0        # ≈ P > 0.77
+  occ_th: 0.0        # ≈ P > 0.77
   free_th: -1.0      # ≈ P < 0.27
   min_shift: 2
   timeout: 1.5

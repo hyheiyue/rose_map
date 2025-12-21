@@ -72,7 +72,6 @@ public:
 
         esdf_->insertPointCloud(pts, sensor_origin, current_time_);
         esdf_->update(current_time_);
-        esdf_->updateEnd();
         if (publisherSubscribed(occ_map_pub_)) {
             sensor_msgs::msg::PointCloud2 occ_msg;
             occ_msg.header = msg->header;

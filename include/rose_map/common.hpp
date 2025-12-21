@@ -1,4 +1,4 @@
 #pragma once
 #include "yaml-cpp/yaml.h"
 #include <Eigen/Dense>
-using Clock = double;
+using Clock = float;

@@ -2,10 +2,10 @@
 
 #include "occ_map.hpp"
 
-#include <vector>
-#include <cstdint>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <vector>
 
 namespace rose_map {
 
@@ -27,7 +27,6 @@ public:
         const int size2d = nx_ * ny_;
         buf0_.assign(size2d, 1);
         buf1_.assign(size2d, 1);
-
 
         curr_ = &buf0_;
 
@@ -94,30 +93,28 @@ public:
         }
     }
 
-
     void update(Clock now) {
         OccMap::update(now);
-
+        upper_idx_.clear();
+        lower_idx_.clear();
         const int size2d = nx_ * ny_;
-
 
         std::vector<uint8_t>* other = (curr_ == &buf0_) ? &buf1_ : &buf0_;
 
         std::fill(other->begin(), other->end(), static_cast<uint8_t>(1));
 
-
         const Eigen::Vector3f robo_base = getRoboBase();
         const float occ_th = OccMap::params_.occ_th;
 
-        for (int idx3d : active_idx_) {
+        for (int idx3d: occupied_buffer_idx_) {
             VoxelKey3D k3 = index3DToKey3D(idx3d);
-            VoxelKey2D k2{ k3.x, k3.y };
+            VoxelKey2D k2 { k3.x, k3.y };
             int idx2d = key2DToIndex2D(k2);
-            if (idx2d < 0) continue;
+            if (idx2d < 0)
+                continue;
 
             (*other)[idx2d] = isPassableCached(idx3d, robo_base, occ_th) ? 1 : 0;
         }
-
 
         upper_idx_.clear();
         lower_idx_.clear();
@@ -135,20 +132,19 @@ public:
         }
 
         curr_ = other;
-
     }
 
     inline bool isPassableCached(int idx, const Eigen::Vector3f& robo_base, float occ_th) const {
         const Cell& c = grid_[idx];
 
-        if (!c.active) return true;
-        if (c.log_odds <= occ_th) return true;
-
+        if (!isOccupied(idx, now_))
+            return true;
 
         Eigen::Vector3f p = key3DToWorld(index3DToKey3D(idx));
         Eigen::Vector3f diff = p - robo_base;
 
-        if (diff.z() < params_.min_diff_z) return true;
+        if (diff.z() < params_.min_diff_z)
+            return true;
 
         return false;
     }
@@ -172,12 +168,6 @@ public:
         return pts;
     }
 
-    void updateEnd() {
-        OccMap::updateEnd();
-        upper_idx_.clear();
-        lower_idx_.clear();
-    }
-
     struct Params {
         float origin2base { 0.0f };
         float min_diff_z { 0.0f };
@@ -188,8 +178,9 @@ public:
         }
     } params_;
 
-
-    const std::vector<uint8_t>& acc_grid_view() const { return *curr_; }
+    const std::vector<uint8_t>& acc_grid_view() const {
+        return *curr_;
+    }
 
     const std::vector<uint8_t>& last_acc_grid_view() const {
         return (curr_ == &buf0_) ? buf1_ : buf0_;
