@@ -32,15 +32,19 @@ public:
         esdf_map_pub_ =
             this->create_publisher<sensor_msgs::msg::PointCloud2>("esdf_out", rclcpp::QoS(10));
     }
-    double occ_cost_accum_ = 0.0;
+    double occ_cost_accum_ms_ = 0.0;
     size_t occ_call_count_ = 0;
-    double last_report_time_ = 0.0;
+
+    std::chrono::steady_clock::time_point last_report_tp_;
 
     void pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
-        const double time = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
+        const double ros_time = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
 
-        current_time_ = time;
+        static double t_init = -1.0;
+        if (t_init < 0.0)
+            t_init = ros_time;
 
+        current_time_ = static_cast<Clock>(ros_time - t_init);
         sensor_msgs::PointCloud2ConstIterator<float> iter_x(*msg, "x");
         sensor_msgs::PointCloud2ConstIterator<float> iter_y(*msg, "y");
         sensor_msgs::PointCloud2ConstIterator<float> iter_z(*msg, "z");
@@ -71,55 +75,58 @@ public:
         }
 
         esdf_->insertPointCloud(pts, sensor_origin, current_time_);
-        static auto last_esdf_update = std::chrono::steady_clock::now();
+
+        static auto last_esdf_update_tp = std::chrono::steady_clock::now();
 
         const auto now_sys = std::chrono::steady_clock::now();
 
-        if (std::chrono::duration<double>(now_sys - last_esdf_update).count() >= 0.1) {
+        if (std::chrono::duration<double>(now_sys - last_esdf_update_tp).count() >= 0.1) {
             esdf_->update(current_time_);
-            last_esdf_update = now_sys;
-        }
-        if (publisherSubscribed(occ_map_pub_)) {
-            sensor_msgs::msg::PointCloud2 occ_msg;
-            occ_msg.header = msg->header;
-            auto cloud = esdf_->OccMap::getOccupiedPoints();
-            pubPointcloud(cloud, occ_msg, occ_map_pub_);
-        }
-        if (publisherSubscribed(acc_map_pub_)) {
-            sensor_msgs::msg::PointCloud2 acc_msg;
-            acc_msg.header = msg->header;
-            auto cloud = esdf_->AccMap::getOccupiedPoints();
-            pubPointcloud(cloud, acc_msg, acc_map_pub_);
-        }
-        if (publisherSubscribed(esdf_map_pub_)) {
-            sensor_msgs::msg::PointCloud2 esdf_msg;
-            esdf_msg.header = msg->header;
-            auto cloud = esdf_->ESDF::getOccupiedPoints();
-            pubPointcloud(cloud, esdf_msg, esdf_map_pub_);
+            last_esdf_update_tp = now_sys;
+            if (publisherSubscribed(occ_map_pub_)) {
+                sensor_msgs::msg::PointCloud2 occ_msg;
+                occ_msg.header = msg->header;
+                auto cloud = esdf_->OccMap::getOccupiedPoints();
+                pubPointcloud(cloud, occ_msg, occ_map_pub_);
+            }
+
+            if (publisherSubscribed(acc_map_pub_)) {
+                sensor_msgs::msg::PointCloud2 acc_msg;
+                acc_msg.header = msg->header;
+                auto cloud = esdf_->AccMap::getOccupiedPoints();
+                pubPointcloud(cloud, acc_msg, acc_map_pub_);
+            }
+
+            if (publisherSubscribed(esdf_map_pub_)) {
+                sensor_msgs::msg::PointCloud2 esdf_msg;
+                esdf_msg.header = msg->header;
+                auto cloud = esdf_->ESDF::getOccupiedPoints();
+                pubPointcloud(cloud, esdf_msg, esdf_map_pub_);
+            }
         }
 
-        // pubOccPointcloud(current_time_, msg);
         const auto t1 = std::chrono::steady_clock::now();
         const double cost_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
-        occ_cost_accum_ += cost_ms;
+        occ_cost_accum_ms_ += cost_ms;
         occ_call_count_++;
 
-        if (last_report_time_ == 0.0)
-            last_report_time_ = current_time_;
+        if (last_report_tp_.time_since_epoch().count() == 0) {
+            last_report_tp_ = now_sys;
+        }
 
-        if (current_time_ - last_report_time_ >= 1.0) {
+        if (std::chrono::duration<double>(now_sys - last_report_tp_).count() >= 1.0) {
             RCLCPP_INFO(
                 this->get_logger(),
                 "[OccMap] %.2f ms/s, avg %.3f ms (%zu calls)",
-                occ_cost_accum_,
-                occ_cost_accum_ / std::max<size_t>(1, occ_call_count_),
+                occ_cost_accum_ms_,
+                occ_cost_accum_ms_ / std::max<size_t>(1, occ_call_count_),
                 occ_call_count_
             );
 
-            occ_cost_accum_ = 0.0;
+            occ_cost_accum_ms_ = 0.0;
             occ_call_count_ = 0;
-            last_report_time_ = current_time_;
+            last_report_tp_ = now_sys;
         }
     }
 

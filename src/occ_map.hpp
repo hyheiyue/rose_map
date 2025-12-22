@@ -68,10 +68,10 @@ public:
         hit_buf_.stamp.resize(N, 0);
         free_buf_.stamp.resize(N, 0);
         ray_buf_.stamp.resize(N, 0);
-
+        occupied_pos_.assign(N, -1);
         origin_key_ = worldToKey3D(origin_);
         ox_ = oy_ = oz_ = 0;
-
+        slide_cleared_idx_.reserve(nx_ * ny_ + nx_ * nz_ + ny_ * nz_);
         occupied_buffer_idx_.reserve(N);
     }
 
@@ -83,7 +83,19 @@ public:
         float log_odds = 0.f;
         Clock last_update = 0.0;
     };
-
+    static constexpr int HIT_D[5][3] = { { 0, 0, 0 },
+                                         { -1, 0, 0 },
+                                         { 1, 0, 0 },
+                                         { 0, -1, 0 },
+                                         { 0, 1, 0 } };
+    static constexpr int RAY_D[1][3] = {
+        { 0, 0, 0 },
+        //  { -1, 0, 0 },
+        //  { 1, 0, 0 },
+        //  { 0, -1, 0 },
+        //  { 0, 1, 0 }
+    };
+    static constexpr int FREE_D[1][3] = { { 0, 0, 0 } };
     void insertPointCloud(
         const std::vector<Eigen::Vector3f>& pts,
         const Eigen::Vector3f& sensor_origin,
@@ -118,21 +130,22 @@ public:
                     int hit_idx = key3DToIndex3D(k_hit);
                     if (hit_idx < 0)
                         continue;
-                    if (params_.use_ray) {
-                        local.ray.push_back(hit_idx);
-                    }
 
-                    static const int d[5][3] = { { 0, 0, 0 },
-                                                 { -1, 0, 0 },
-                                                 { 1, 0, 0 },
-                                                 { 0, -1, 0 },
-                                                 { 0, 1, 0 } };
-
-                    for (auto& n: d) {
+                    for (auto& n: HIT_D) {
                         int idx =
                             key3DToIndex3D({ k_hit.x + n[0], k_hit.y + n[1], k_hit.z + n[2] });
-                        if (idx >= 0)
+                        if (idx >= 0) {
                             local.hit.push_back(idx);
+                        }
+                    }
+                    if (params_.use_ray) {
+                        for (auto n: RAY_D) {
+                            int idx =
+                                key3DToIndex3D({ k_hit.x + n[0], k_hit.y + n[1], k_hit.z + n[2] });
+                            if (idx >= 0) {
+                                local.ray.push_back(idx);
+                            }
+                        }
                     }
                 }
             }
@@ -146,10 +159,33 @@ public:
             for (int idx: local.hit)
                 hit_buf_.tryPush(idx, stamp_now_);
         }
-
         if (params_.use_ray) {
-            for (int idx: ray_buf_.indices)
-                raycastFreeKey(sensor_key, index3DToKey3D(idx));
+            // for(int idx: ray_buf_.indices)
+            // {
+            //     raycastFreeKey(sensor_key, index3DToKey3D(idx));
+            // }
+            tbb::enumerable_thread_specific<std::vector<int>> tls_free;
+
+            tbb::parallel_for(
+                tbb::blocked_range<size_t>(0, ray_buf_.indices.size()),
+                [&](const tbb::blocked_range<size_t>& r) {
+                    auto& local = tls_free.local();
+                    for (size_t i = r.begin(); i < r.end(); ++i) {
+                        int hit_idx = ray_buf_.indices[i];
+                        raycastFreeKeyTLS(sensor_key, index3DToKey3D(hit_idx), local);
+                    }
+                }
+            );
+            size_t total = 0;
+            for (auto& v: tls_free)
+                total += v.size();
+
+            free_buf_.indices.reserve(free_buf_.indices.size() + total);
+            for (auto& v: tls_free) {
+                for (int idx: v) {
+                    free_buf_.tryPush(idx, stamp_now_);
+                }
+            }
         }
 
         tbb::parallel_invoke([&] { commitFree(t); }, [&] { commitHits(t); });
@@ -169,41 +205,47 @@ public:
     void update(Clock now) {
         now_ = now;
 
-        const int N = static_cast<int>(grid_.size());
-
-        tbb::enumerable_thread_specific<std::vector<int>> tls;
-
-        tbb::parallel_for(0, N, [&](int i) {
-            if (isOccupied(i, now_))
-                tls.local().push_back(i);
-        });
-
-        occupied_buffer_idx_.clear();
-        size_t total = 0;
-        for (auto& v: tls)
-            total += v.size();
-
-        occupied_buffer_idx_.reserve(total);
-        for (auto& v: tls)
-            occupied_buffer_idx_.insert(occupied_buffer_idx_.end(), v.begin(), v.end());
+        size_t write = 0;
+        for (size_t read = 0; read < occupied_buffer_idx_.size(); ++read) {
+            int idx = occupied_buffer_idx_[read];
+            if (isOccupied(idx, now)) {
+                occupied_buffer_idx_[write++] = idx;
+            } else {
+                occupied_pos_[idx] = -1;
+            }
+        }
+        occupied_buffer_idx_.resize(write);
     }
 
     Eigen::Vector3f origin() const {
         return origin_;
     }
-    std::vector<Eigen::Vector4f> getOccupiedPoints() const {
+    std::vector<Eigen::Vector4f> getOccupiedPoints(float sample_resolution_m = 0.05) const {
         std::vector<Eigen::Vector4f> pts;
-        pts.reserve(occupied_buffer_idx_.size());
-        for (int idx: occupied_buffer_idx_) {
-            const Cell& c = grid_[idx];
+
+        if (sample_resolution_m <= 0.0f)
+            sample_resolution_m = voxel_size_;
+
+        // 物理尺度 → stride
+        int stride = std::max(1, static_cast<int>(std::round(sample_resolution_m / voxel_size_)));
+
+        pts.reserve(occupied_buffer_idx_.size() / stride + 1);
+
+        for (size_t i = 0; i < occupied_buffer_idx_.size(); i += stride) {
+            int idx = occupied_buffer_idx_[i];
+
             if (!isOccupied(idx, now_))
                 continue;
+
             auto p = key3DToWorld(index3DToKey3D(idx));
             pts.emplace_back(p.x(), p.y(), p.z(), p.z() - origin_.z());
         }
+
         return pts;
     }
+
     void setOrigin(const Eigen::Vector3f& o) {
+        slide_cleared_idx_.clear();
         VoxelKey3D new_origin = worldToKey3D(o);
         VoxelKey3D shift { new_origin.x - origin_key_.x,
                            new_origin.y - origin_key_.y,
@@ -252,9 +294,13 @@ public:
                     idx = (i * ny_ + j) * nz_ + slice;
                 grid_[idx] = Cell();
                 hit_buf_.stamp[idx] = free_buf_.stamp[idx] = ray_buf_.stamp[idx] = 0;
+                slide_cleared_idx_.push_back(idx);
             }
     }
     void resetAll() {
+        slide_cleared_idx_.clear(); // === NEW ===
+        for (int i = 0; i < (int)grid_.size(); ++i)
+            slide_cleared_idx_.push_back(i);
         std::fill(grid_.begin(), grid_.end(), Cell());
         std::fill(hit_buf_.stamp.begin(), hit_buf_.stamp.end(), 0);
         std::fill(free_buf_.stamp.begin(), free_buf_.stamp.end(), 0);
@@ -262,24 +308,29 @@ public:
     }
 
     void markHitWithNeighbors(const VoxelKey3D& k) {
-        static const int d[5][3] = { { 0, 0, 0 },
-                                     { -1, 0, 0 },
-                                     { 1, 0, 0 },
-                                     { 0, -1, 0 },
-                                     { 0, 1, 0 } };
-
-        for (auto& n: d) {
+        for (auto& n: HIT_D) {
             int idx = key3DToIndex3D({ k.x + n[0], k.y + n[1], k.z + n[2] });
             if (idx >= 0)
                 hit_buf_.tryPush(idx, stamp_now_);
         }
     }
-
-    void trackState(bool was, bool now, int idx) {
-        // if (!was && now)
-        //     up_buf_.tryPush(idx, stamp_now_);
-        // else if (was && !now)
-        //     down_buf_.tryPush(idx, stamp_now_);
+    const std::vector<int>& slideClearedIndices() const {
+        return slide_cleared_idx_;
+    }
+    inline void trackState(bool was, bool now, int idx) {
+        if (!was && now) {
+            occupied_pos_[idx] = occupied_buffer_idx_.size();
+            occupied_buffer_idx_.push_back(idx);
+        } else if (was && !now) {
+            int pos = occupied_pos_[idx];
+            if (pos < 0)
+                return;
+            int last = occupied_buffer_idx_.back();
+            occupied_buffer_idx_[pos] = last;
+            occupied_pos_[last] = pos;
+            occupied_buffer_idx_.pop_back();
+            occupied_pos_[idx] = -1;
+        }
     }
 
     void commitHits(Clock t) {
@@ -330,10 +381,59 @@ public:
 
         int max_steps = dx + dy + dz + 1;
         while ((x != h.x || y != h.y || z != h.z) && max_steps--) {
-            int idx = key3DToIndex3D({ x, y, z });
-            if (idx >= 0)
-                free_buf_.tryPush(idx, stamp_now_);
+            for (const auto& n: FREE_D) {
+                int idx = key3DToIndex3D({ x + n[0], y + n[1], z + n[2] });
+                if (idx >= 0)
+                    free_buf_.tryPush(idx, stamp_now_);
+            }
 
+            if (tMaxX < tMaxY) {
+                if (tMaxX < tMaxZ) {
+                    x += sx;
+                    tMaxX += tDeltaX;
+                } else {
+                    z += sz;
+                    tMaxZ += tDeltaZ;
+                }
+            } else {
+                if (tMaxY < tMaxZ) {
+                    y += sy;
+                    tMaxY += tDeltaY;
+                } else {
+                    z += sz;
+                    tMaxZ += tDeltaZ;
+                }
+            }
+        }
+    }
+
+    inline void raycastFreeKeyTLS(const VoxelKey3D& o, const VoxelKey3D& h, std::vector<int>& out) {
+        if (o.x == h.x && o.y == h.y && o.z == h.z)
+            return;
+
+        int x = o.x, y = o.y, z = o.z;
+        int dx = std::abs(h.x - x);
+        int dy = std::abs(h.y - y);
+        int dz = std::abs(h.z - z);
+
+        int sx = (h.x > x) ? 1 : -1;
+        int sy = (h.y > y) ? 1 : -1;
+        int sz = (h.z > z) ? 1 : -1;
+
+        float tMaxX = 0.5f, tMaxY = 0.5f, tMaxZ = 0.5f;
+        float tDeltaX = dx ? 1.f / dx : std::numeric_limits<float>::infinity();
+        float tDeltaY = dy ? 1.f / dy : std::numeric_limits<float>::infinity();
+        float tDeltaZ = dz ? 1.f / dz : std::numeric_limits<float>::infinity();
+
+        int max_steps = dx + dy + dz + 1;
+
+        while ((x != h.x || y != h.y || z != h.z) && max_steps--) {
+            for (const auto& n: FREE_D) {
+                int idx = key3DToIndex3D({ x + n[0], y + n[1], z + n[2] });
+                if (idx >= 0)
+                    out.push_back(idx);
+            }
+            // 3D DDA
             if (tMaxX < tMaxY) {
                 if (tMaxX < tMaxZ) {
                     x += sx;
@@ -402,9 +502,9 @@ public:
     int ox_, oy_, oz_;
 
     std::vector<int> occupied_buffer_idx_;
-
+    std::vector<int> occupied_pos_;
     StampedIndexBuffer hit_buf_, free_buf_, ray_buf_;
-
+    std::vector<int> slide_cleared_idx_;
     uint32_t stamp_now_ = 1;
     VoxelKey3D min_key_, max_key_;
     Clock now_;

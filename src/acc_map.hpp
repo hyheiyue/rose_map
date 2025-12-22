@@ -28,7 +28,6 @@ public:
         const int size2d = nx_ * ny_;
         buf0_.assign(size2d, 1);
         buf1_.assign(size2d, 1);
-
         curr_ = &buf0_;
 
         upper_idx_.reserve(1024);
@@ -94,7 +93,6 @@ public:
 
         upper_idx_.clear();
         lower_idx_.clear();
-
         const int size2d = nx_ * ny_;
         std::vector<uint8_t>* other = (curr_ == &buf0_) ? &buf1_ : &buf0_;
 
@@ -136,16 +134,67 @@ public:
         }
 
         for (int i = 0; i < size2d; ++i) {
-            bool was_passable = ((*curr_)[i] != 0);
-            bool now_passable = ((*other)[i] != 0);
-            if (was_passable && !now_passable) {
+            bool was = ((*curr_)[i] != 0);
+            bool nowp = ((*other)[i] != 0);
+
+            if (was && !nowp)
                 upper_idx_.push_back(i);
-            } else if (!was_passable && now_passable) {
+            else if (!was && nowp)
                 lower_idx_.push_back(i);
-            }
         }
 
         curr_ = other;
+    }
+    inline int idx2d(int x, int y) const {
+        return y * nx_ + x;
+    }
+
+    inline bool inMap(int x, int y) const {
+        return (unsigned)x < (unsigned)nx_ && (unsigned)y < (unsigned)ny_;
+    }
+    void dilate2D(const std::vector<uint8_t>& src, std::vector<uint8_t>& dst) {
+        static const int d4[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
+
+        dst = src;
+
+        for (int y = 0; y < ny_; ++y) {
+            for (int x = 0; x < nx_; ++x) {
+                int i = idx2d(x, y);
+                if (src[i])
+                    continue;
+
+                for (auto& d: d4) {
+                    int nx = x + d[0];
+                    int ny = y + d[1];
+                    if (inMap(nx, ny) && src[idx2d(nx, ny)]) {
+                        dst[i] = 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    void erode2D(const std::vector<uint8_t>& src, std::vector<uint8_t>& dst) {
+        static const int d4[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
+
+        dst = src;
+
+        for (int y = 0; y < ny_; ++y) {
+            for (int x = 0; x < nx_; ++x) {
+                int i = idx2d(x, y);
+                if (!src[i])
+                    continue;
+
+                for (auto& d: d4) {
+                    int nx = x + d[0];
+                    int ny = y + d[1];
+                    if (!inMap(nx, ny) || !src[idx2d(nx, ny)]) {
+                        dst[i] = 0;
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     std::vector<Eigen::Vector4f> getOccupiedPoints() const {
@@ -189,7 +238,6 @@ public:
         return (curr_ == &buf0_) ? buf1_ : buf0_;
     }
 
-private:
     std::vector<uint8_t> buf0_;
     std::vector<uint8_t> buf1_;
     std::vector<uint8_t>* curr_ { nullptr };
