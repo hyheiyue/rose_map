@@ -22,25 +22,15 @@ class AccMap: public OccMap {
 public:
     using Ptr = std::shared_ptr<AccMap>;
 
-    explicit AccMap(const YAML::Node& config): OccMap(config) {
-        params_.load(config["acc_map"]);
+    explicit AccMap(rclcpp::Node& node);
 
-        const int size2d = nx_ * ny_;
-        buf0_.assign(size2d, 1);
-        buf1_.assign(size2d, 1);
-        curr_ = &buf0_;
-
-        upper_idx_.reserve(1024);
-        lower_idx_.reserve(1024);
-    }
-
-    static Ptr create(const YAML::Node& config) {
-        return std::make_shared<AccMap>(config);
+    static Ptr create(rclcpp::Node& node) {
+        return std::make_shared<AccMap>(node);
     }
 
     Eigen::Vector3f getRoboBase() const {
         // Robot base position in world frame
-        return origin_ - Eigen::Vector3f(0.0f, 0.0f, params_.origin2base);
+        return origin_ - Eigen::Vector3f(0.0f, 0.0f, params_.acc_map_params.origin2base);
     }
 
     inline int key2DToIndex2D(const VoxelKey2D& k) const {
@@ -84,152 +74,13 @@ public:
             return true;
         Eigen::Vector3f p = key3DToWorld(index3DToKey3D(idx));
         Eigen::Vector3f diff = p - robo_base;
-        if (diff.z() < params_.min_diff_z)
+        if (diff.z() < params_.acc_map_params.min_diff_z)
             return true;
         return false;
     }
-    void update(Clock now) {
-        OccMap::update(now);
+    void update(Clock now);
 
-        upper_idx_.clear();
-        lower_idx_.clear();
-        const int size2d = nx_ * ny_;
-        std::vector<uint8_t>* other = (curr_ == &buf0_) ? &buf1_ : &buf0_;
-
-        std::fill(other->begin(), other->end(), static_cast<uint8_t>(1));
-
-        std::vector<int> block_cnt(size2d, 0);
-
-        const Eigen::Vector3f robo_base = getRoboBase();
-
-        for (int idx3d: occupied_buffer_idx_) {
-            if (!isOccupied(idx3d, now))
-                continue;
-
-            VoxelKey3D k3 = index3DToKey3D(idx3d);
-            VoxelKey2D k2 { k3.x, k3.y };
-            int idx2d = key2DToIndex2D(k2);
-            if (idx2d < 0)
-                continue;
-            if (!isPassableCached(idx3d, robo_base)) {
-                block_cnt[idx2d]++;
-            }
-        }
-
-        for (int i = 0; i < size2d; ++i) {
-            bool blocked = false;
-
-            if (block_cnt[i] >= params_.min_block_count)
-                blocked = true;
-            if (params_.block_ratio > 0.0f) {
-                float ratio = static_cast<float>(block_cnt[i]) / static_cast<float>(nz_);
-                if (ratio >= params_.block_ratio) {
-                    blocked = true;
-                } else {
-                    blocked = false;
-                }
-            }
-
-            (*other)[i] = blocked ? 0 : 1;
-        }
-
-        for (int i = 0; i < size2d; ++i) {
-            bool was = ((*curr_)[i] != 0);
-            bool nowp = ((*other)[i] != 0);
-
-            if (was && !nowp)
-                upper_idx_.push_back(i);
-            else if (!was && nowp)
-                lower_idx_.push_back(i);
-        }
-
-        curr_ = other;
-    }
-    inline int idx2d(int x, int y) const {
-        return y * nx_ + x;
-    }
-
-    inline bool inMap(int x, int y) const {
-        return (unsigned)x < (unsigned)nx_ && (unsigned)y < (unsigned)ny_;
-    }
-    void dilate2D(const std::vector<uint8_t>& src, std::vector<uint8_t>& dst) {
-        static const int d4[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
-
-        dst = src;
-
-        for (int y = 0; y < ny_; ++y) {
-            for (int x = 0; x < nx_; ++x) {
-                int i = idx2d(x, y);
-                if (src[i])
-                    continue;
-
-                for (auto& d: d4) {
-                    int nx = x + d[0];
-                    int ny = y + d[1];
-                    if (inMap(nx, ny) && src[idx2d(nx, ny)]) {
-                        dst[i] = 1;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    void erode2D(const std::vector<uint8_t>& src, std::vector<uint8_t>& dst) {
-        static const int d4[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
-
-        dst = src;
-
-        for (int y = 0; y < ny_; ++y) {
-            for (int x = 0; x < nx_; ++x) {
-                int i = idx2d(x, y);
-                if (!src[i])
-                    continue;
-
-                for (auto& d: d4) {
-                    int nx = x + d[0];
-                    int ny = y + d[1];
-                    if (!inMap(nx, ny) || !src[idx2d(nx, ny)]) {
-                        dst[i] = 0;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    std::vector<Eigen::Vector4f> getOccupiedPoints() const {
-        std::vector<Eigen::Vector4f> pts;
-        pts.reserve(nx_ * ny_ / 8 + 16);
-
-        for (int i = 0; i < static_cast<int>(curr_->size()); ++i) {
-            if ((*curr_)[i] == 0) {
-                VoxelKey2D key2d = index2DToKey2D(i);
-                Eigen::Vector3f p = key2DToWorld(key2d);
-                pts.emplace_back(p.x(), p.y(), p.z(), 0.0f);
-            }
-        }
-
-        Eigen::Vector3f robo_base = getRoboBase();
-        pts.emplace_back(robo_base.x(), robo_base.y(), robo_base.z(), 0.0f);
-
-        return pts;
-    }
-
-    struct Params {
-        float origin2base { 0.0f };
-        float min_diff_z { 0.0f };
-
-        int min_block_count { 1 };
-        float block_ratio { 0.4f };
-
-        void load(const YAML::Node& config) {
-            origin2base = config["origin2base"].as<float>();
-            min_diff_z = config["min_diff_z"].as<float>();
-            min_block_count = config["min_block_count"].as<int>(1);
-            block_ratio = config["block_ratio"].as<float>(0.0f);
-        }
-    } params_;
-
+    std::vector<Eigen::Vector4f> getOccupiedPoints() const;
     const std::vector<uint8_t>& acc_grid_view() const {
         return *curr_;
     }

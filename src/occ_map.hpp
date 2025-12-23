@@ -1,23 +1,15 @@
 #pragma once
 
-#include "ankerl/unordered_dense.h"
+#include "parameters.hpp"
 #include "rose_map/common.hpp"
-#include "rose_map/yaml_eigen.hpp"
 
-#include "execution"
 #include <Eigen/Core>
-#include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <iostream>
 #include <limits>
 #include <memory>
-#include <tbb/blocked_range.h>
-#include <tbb/enumerable_thread_specific.h>
-#include <tbb/parallel_for.h>
-#include <tbb/parallel_invoke.h>
-#include <thread>
 #include <vector>
+
 namespace rose_map {
 
 struct VoxelKey3D {
@@ -48,35 +40,10 @@ class OccMap {
 public:
     using Ptr = std::shared_ptr<OccMap>;
 
-    explicit OccMap(const YAML::Node& config) {
-        voxel_size_ = config["occ_map"]["voxel_size"].as<float>();
-        size_ = config["occ_map"]["size"].as<Eigen::Vector3f>();
-        origin_ = config["occ_map"]["origin"].as<Eigen::Vector3f>();
-        params_.load(config["occ_map"]);
+    explicit OccMap(rclcpp::Node& node);
 
-        Eigen::Vector3f half = size_ * 0.5f;
-        min_key_ = worldToKey3D(origin_ - half);
-        max_key_ = worldToKey3D(origin_ + half);
-
-        nx_ = max_key_.x - min_key_.x + 1;
-        ny_ = max_key_.y - min_key_.y + 1;
-        nz_ = max_key_.z - min_key_.z + 1;
-
-        const size_t N = size_t(nx_) * ny_ * nz_;
-        grid_.resize(N);
-
-        hit_buf_.stamp.resize(N, 0);
-        free_buf_.stamp.resize(N, 0);
-        ray_buf_.stamp.resize(N, 0);
-        occupied_pos_.assign(N, -1);
-        origin_key_ = worldToKey3D(origin_);
-        ox_ = oy_ = oz_ = 0;
-        slide_cleared_idx_.reserve(nx_ * ny_ + nx_ * nz_ + ny_ * nz_);
-        occupied_buffer_idx_.reserve(N);
-    }
-
-    static Ptr create(const YAML::Node& config) {
-        return std::make_shared<OccMap>(config);
+    static Ptr create(rclcpp::Node& node) {
+        return std::make_shared<OccMap>(node);
     }
 
     struct Cell {
@@ -100,213 +67,28 @@ public:
         const std::vector<Eigen::Vector3f>& pts,
         const Eigen::Vector3f& sensor_origin,
         Clock t
-    ) {
-        ++stamp_now_;
-
-        hit_buf_.clear();
-        free_buf_.clear();
-        ray_buf_.clear();
-
-        const float max_r2 = params_.max_ray_range * params_.max_ray_range;
-        const VoxelKey3D sensor_key = worldToKey3D(sensor_origin);
-        struct LocalBuf {
-            std::vector<int> ray;
-            std::vector<int> hit;
-        };
-
-        tbb::enumerable_thread_specific<LocalBuf> tls;
-
-        tbb::parallel_for(
-            tbb::blocked_range<size_t>(0, pts.size()),
-            [&](const tbb::blocked_range<size_t>& r) {
-                auto& local = tls.local();
-
-                for (size_t i = r.begin(); i < r.end(); ++i) {
-                    const auto& p = pts[i];
-                    if ((p - sensor_origin).squaredNorm() > max_r2)
-                        continue;
-
-                    VoxelKey3D k_hit = worldToKey3D(p);
-                    int hit_idx = key3DToIndex3D(k_hit);
-                    if (hit_idx < 0)
-                        continue;
-
-                    for (auto& n: HIT_D) {
-                        int idx =
-                            key3DToIndex3D({ k_hit.x + n[0], k_hit.y + n[1], k_hit.z + n[2] });
-                        if (idx >= 0) {
-                            local.hit.push_back(idx);
-                        }
-                    }
-                    if (params_.use_ray) {
-                        for (auto n: RAY_D) {
-                            int idx =
-                                key3DToIndex3D({ k_hit.x + n[0], k_hit.y + n[1], k_hit.z + n[2] });
-                            if (idx >= 0) {
-                                local.ray.push_back(idx);
-                            }
-                        }
-                    }
-                }
-            }
-        );
-
-        for (auto& local: tls) {
-            if (params_.use_ray) {
-                for (int idx: local.ray)
-                    ray_buf_.tryPush(idx, stamp_now_);
-            }
-            for (int idx: local.hit)
-                hit_buf_.tryPush(idx, stamp_now_);
-        }
-        if (params_.use_ray) {
-            // for(int idx: ray_buf_.indices)
-            // {
-            //     raycastFreeKey(sensor_key, index3DToKey3D(idx));
-            // }
-            tbb::enumerable_thread_specific<std::vector<int>> tls_free;
-
-            tbb::parallel_for(
-                tbb::blocked_range<size_t>(0, ray_buf_.indices.size()),
-                [&](const tbb::blocked_range<size_t>& r) {
-                    auto& local = tls_free.local();
-                    for (size_t i = r.begin(); i < r.end(); ++i) {
-                        int hit_idx = ray_buf_.indices[i];
-                        raycastFreeKeyTLS(sensor_key, index3DToKey3D(hit_idx), local);
-                    }
-                }
-            );
-            size_t total = 0;
-            for (auto& v: tls_free)
-                total += v.size();
-
-            free_buf_.indices.reserve(free_buf_.indices.size() + total);
-            for (auto& v: tls_free) {
-                for (int idx: v) {
-                    free_buf_.tryPush(idx, stamp_now_);
-                }
-            }
-        }
-
-        tbb::parallel_invoke([&] { commitFree(t); }, [&] { commitHits(t); });
-    }
-
+    );
     inline bool isOccupied(int idx, Clock now) const {
         if (idx < 0)
-            return params_.unknown_is_occupied;
+            return params_.occ_map_params.unknown_is_occupied;
 
         const Cell& c = grid_[idx];
-        if (now - c.last_update > params_.timeout)
+        if (now - c.last_update > params_.occ_map_params.timeout)
             return false;
 
-        return c.log_odds > params_.occ_th;
+        return c.log_odds > params_.occ_map_params.occ_th;
     }
 
-    void update(Clock now) {
-        now_ = now;
-
-        size_t write = 0;
-        for (size_t read = 0; read < occupied_buffer_idx_.size(); ++read) {
-            int idx = occupied_buffer_idx_[read];
-            if (isOccupied(idx, now)) {
-                occupied_buffer_idx_[write++] = idx;
-            } else {
-                occupied_pos_[idx] = -1;
-            }
-        }
-        occupied_buffer_idx_.resize(write);
-    }
-
+    void update(Clock now);
     Eigen::Vector3f origin() const {
         return origin_;
     }
-    std::vector<Eigen::Vector4f> getOccupiedPoints(float sample_resolution_m = 0.05) const {
-        std::vector<Eigen::Vector4f> pts;
+    std::vector<Eigen::Vector4f> getOccupiedPoints(float sample_resolution_m = 0.05) const;
 
-        if (sample_resolution_m <= 0.0f)
-            sample_resolution_m = voxel_size_;
-
-        // 物理尺度 → stride
-        int stride = std::max(1, static_cast<int>(std::round(sample_resolution_m / voxel_size_)));
-
-        pts.reserve(occupied_buffer_idx_.size() / stride + 1);
-
-        for (size_t i = 0; i < occupied_buffer_idx_.size(); i += stride) {
-            int idx = occupied_buffer_idx_[i];
-
-            if (!isOccupied(idx, now_))
-                continue;
-
-            auto p = key3DToWorld(index3DToKey3D(idx));
-            pts.emplace_back(p.x(), p.y(), p.z(), p.z() - origin_.z());
-        }
-
-        return pts;
-    }
-
-    void setOrigin(const Eigen::Vector3f& o) {
-        slide_cleared_idx_.clear();
-        VoxelKey3D new_origin = worldToKey3D(o);
-        VoxelKey3D shift { new_origin.x - origin_key_.x,
-                           new_origin.y - origin_key_.y,
-                           new_origin.z - origin_key_.z };
-        const int min_shift = params_.min_shift;
-        if (std::abs(shift.x) < min_shift && std::abs(shift.y) < min_shift
-            && std::abs(shift.z) < min_shift)
-            return;
-        if (std::abs(shift.x) >= nx_ || std::abs(shift.y) >= ny_ || std::abs(shift.z) >= nz_) {
-            resetAll();
-            origin_key_ = new_origin;
-            origin_ = o;
-            return;
-        }
-        slideAxis(0, shift.x);
-        slideAxis(1, shift.y);
-        slideAxis(2, shift.z);
-        origin_key_ = new_origin;
-        origin_ = o;
-    }
-    void slideAxis(int axis, int shift) {
-        if (shift == 0)
-            return;
-        int steps = std::abs(shift);
-        int dir = shift > 0 ? 1 : -1;
-        for (int s = 0; s < steps; ++s) {
-            int slice = (axis == 0 ? ox_ : axis == 1 ? oy_ : oz_);
-            clearSlice(axis, slice);
-            if (axis == 0)
-                ox_ = (ox_ + dir + nx_) % nx_;
-            if (axis == 1)
-                oy_ = (oy_ + dir + ny_) % ny_;
-            if (axis == 2)
-                oz_ = (oz_ + dir + nz_) % nz_;
-        }
-    }
-    void clearSlice(int axis, int slice) {
-        for (int i = 0; i < ny_; ++i)
-            for (int j = 0; j < nz_; ++j) {
-                int idx;
-                if (axis == 0)
-                    idx = (slice * ny_ + i) * nz_ + j;
-                else if (axis == 1)
-                    idx = (i * ny_ + slice) * nz_ + j;
-                else
-                    idx = (i * ny_ + j) * nz_ + slice;
-                grid_[idx] = Cell();
-                hit_buf_.stamp[idx] = free_buf_.stamp[idx] = ray_buf_.stamp[idx] = 0;
-                slide_cleared_idx_.push_back(idx);
-            }
-    }
-    void resetAll() {
-        slide_cleared_idx_.clear(); // === NEW ===
-        for (int i = 0; i < (int)grid_.size(); ++i)
-            slide_cleared_idx_.push_back(i);
-        std::fill(grid_.begin(), grid_.end(), Cell());
-        std::fill(hit_buf_.stamp.begin(), hit_buf_.stamp.end(), 0);
-        std::fill(free_buf_.stamp.begin(), free_buf_.stamp.end(), 0);
-        std::fill(ray_buf_.stamp.begin(), ray_buf_.stamp.end(), 0);
-    }
-
+    void setOrigin(const Eigen::Vector3f& o);
+    void slideAxis(int axis, int shift);
+    void clearSlice(int axis, int slice);
+    void resetAll();
     void markHitWithNeighbors(const VoxelKey3D& k) {
         for (auto& n: HIT_D) {
             int idx = key3DToIndex3D({ k.x + n[0], k.y + n[1], k.z + n[2] });
@@ -314,9 +96,7 @@ public:
                 hit_buf_.tryPush(idx, stamp_now_);
         }
     }
-    const std::vector<int>& slideClearedIndices() const {
-        return slide_cleared_idx_;
-    }
+
     inline void trackState(bool was, bool now, int idx) {
         if (!was && now) {
             occupied_pos_[idx] = occupied_buffer_idx_.size();
@@ -333,33 +113,9 @@ public:
         }
     }
 
-    void commitHits(Clock t) {
-        for (int idx: hit_buf_.indices) {
-            Cell& c = grid_[idx];
-            bool was = isOccupied(idx, t);
+    void commitHits(Clock t);
 
-            c.log_odds = std::min(c.log_odds + params_.log_hit, params_.log_max);
-            c.last_update = t;
-
-            bool now = isOccupied(idx, t);
-            trackState(was, now, idx);
-        }
-        hit_buf_.clear();
-    }
-
-    void commitFree(Clock t) {
-        for (int idx: free_buf_.indices) {
-            Cell& c = grid_[idx];
-            bool was = isOccupied(idx, t);
-
-            c.log_odds = std::max(c.log_odds + params_.log_free, params_.log_min);
-            c.last_update = t;
-
-            bool now = isOccupied(idx, t);
-            trackState(was, now, idx);
-        }
-        free_buf_.clear();
-    }
+    void commitFree(Clock t);
 
     void raycastFreeKey(const VoxelKey3D& o, const VoxelKey3D& h) {
         if (o.x == h.x && o.y == h.y && o.z == h.z)
@@ -504,46 +260,11 @@ public:
     std::vector<int> occupied_buffer_idx_;
     std::vector<int> occupied_pos_;
     StampedIndexBuffer hit_buf_, free_buf_, ray_buf_;
-    std::vector<int> slide_cleared_idx_;
     uint32_t stamp_now_ = 1;
     VoxelKey3D min_key_, max_key_;
     Clock now_;
 
-    struct Params {
-        float log_hit = 0.85f;
-        float log_free = -0.4f;
-        float log_min = -5.f;
-        float log_max = 5.f;
-        float occ_th = 1.2f;
-        int min_shift = 1;
-        double timeout = 0.8;
-        double max_ray_range = 20.0;
-        bool unknown_is_occupied = false;
-        bool use_ray = true;
-
-        void load(const YAML::Node& c) {
-            if (c["log_hit"])
-                log_hit = c["log_hit"].as<float>();
-            if (c["log_free"])
-                log_free = c["log_free"].as<float>();
-            if (c["log_min"])
-                log_min = c["log_min"].as<float>();
-            if (c["log_max"])
-                log_max = c["log_max"].as<float>();
-            if (c["occ_th"])
-                occ_th = c["occ_th"].as<float>();
-            if (c["min_shift"])
-                min_shift = c["min_shift"].as<int>();
-            if (c["timeout"])
-                timeout = c["timeout"].as<double>();
-            if (c["max_ray_range"])
-                max_ray_range = c["max_ray_range"].as<double>();
-            if (c["unknown_is_occupied"])
-                unknown_is_occupied = c["unknown_is_occupied"].as<bool>();
-            if (c["use_ray"])
-                use_ray = c["use_ray"].as<bool>();
-        }
-    } params_;
+    Parameters params_;
 };
 
 } // namespace rose_map
