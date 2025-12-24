@@ -23,7 +23,6 @@ public:
     }
     std::vector<Eigen::Vector4f> getOccupiedPoints(float sample_resolution_m = 0.1f) const;
 
-private:
     static constexpr float kInf = 1e6f;
 
     struct QNode {
@@ -52,8 +51,11 @@ private:
         return k >= 4;
     }
 
-    void
-    runKeyDijkstra(const std::vector<uint8_t>& acc, std::vector<float>& dist, bool source_is_occ);
+    void propagateKeyDistanceFieldTwoPass(
+        const std::vector<uint8_t>& acc,
+        std::vector<float>& dist,
+        bool source_is_occ
+    );
 
     void rebuildSigned();
 };

@@ -15,6 +15,7 @@ public:
         node_ = &node;
         RCLCPP_INFO_STREAM(node.get_logger(), "[RoseMap] Initializing...");
         sensor_frame_ = node.declare_parameter<std::string>("rose_map.sensor_frame", "");
+        log_time_ = node.declare_parameter<bool>("rose_map.log_time", false);
         int max_update_rate = node.declare_parameter<int>("rose_map.max_update_rate", 10);
         max_update_dt_ = 1.0 / max_update_rate;
         std::string pointcloud_topic =
@@ -24,12 +25,7 @@ public:
             rclcpp::SensorDataQoS(),
             std::bind(&RoseMap::pointCloudCallback, this, std::placeholders::_1)
         );
-        std::string odom_topic = node.declare_parameter<std::string>("rose_map.odom_topic", "");
-        odometry_sub_ = node.create_subscription<nav_msgs::msg::Odometry>(
-            odom_topic,
-            rclcpp::SensorDataQoS(),
-            std::bind(&RoseMap::odomCallback, this, std::placeholders::_1)
-        );
+
         occ_map_pub_ =
             node.create_publisher<sensor_msgs::msg::PointCloud2>("occ_map_out", rclcpp::QoS(10));
         acc_map_pub_ =
@@ -118,7 +114,7 @@ public:
             last_report_tp_ = now_sys;
         }
 
-        if (std::chrono::duration<double>(now_sys - last_report_tp_).count() >= 1.0) {
+        if (std::chrono::duration<double>(now_sys - last_report_tp_).count() >= 1.0 && log_time_) {
             RCLCPP_INFO(
                 node_->get_logger(),
                 "[RoseMap] %.2f ms/s, avg %.3f ms (%zu calls)",
@@ -148,14 +144,6 @@ public:
         );
     }
 
-    void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
-        auto odom = *msg;
-        setOrigin(Eigen::Vector3f(
-            odom.pose.pose.position.x,
-            odom.pose.pose.position.y,
-            odom.pose.pose.position.z
-        ));
-    }
     bool publisherSubscribed(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher
     ) {
         return publisher->get_subscription_count() > 0;
@@ -203,11 +191,12 @@ public:
     double callback_cost_accum_ms_ = 0.0;
     size_t callback_count_ = 0;
     double max_update_dt_ = 0.1;
+    bool log_time_ = false;
     std::string sensor_frame_;
     std::chrono::steady_clock::time_point last_report_tp_;
     rclcpp::Node* node_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_sub_;
-    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_sub_;
+
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr occ_map_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr acc_map_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr esdf_map_pub_;

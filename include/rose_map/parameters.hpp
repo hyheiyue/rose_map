@@ -8,6 +8,7 @@ public:
         occ_map_params.load(node);
         acc_map_params.load(node);
         esdf_params.load(node);
+        inf_map_params.load(node);
     }
     struct OccMapParams {
         float log_hit = 0.85f;
@@ -38,11 +39,15 @@ public:
         }
     } occ_map_params;
     struct AccMapParams {
-        float origin2base { 0.0f };
-        float min_diff_z { 0.0f };
+        float origin2base = 0.0;
+        float min_diff_z = 0.0;
 
-        int min_block_count { 1 };
-        float block_ratio { 0.4f };
+        int min_block_count = 1;
+        float block_ratio = 0.4f;
+        bool use_static_map = false;
+        int kernel_size = 1;
+        int dilate_iter = 1;
+        std::string static_map_path;
         void load(rclcpp::Node& node) {
             origin2base =
                 node.declare_parameter<float>("rose_map.acc_map.origin2base", origin2base);
@@ -51,6 +56,20 @@ public:
                 node.declare_parameter<int>("rose_map.acc_map.min_block_count", min_block_count);
             block_ratio =
                 node.declare_parameter<float>("rose_map.acc_map.block_ratio", block_ratio);
+            kernel_size = node.declare_parameter<int>("rose_map.acc_map.kernel_size", kernel_size);
+            if (kernel_size % 2 == 0) {
+                kernel_size = (kernel_size > 1) ? kernel_size - 1 : 1;
+            }
+            dilate_iter = node.declare_parameter<int>("rose_map.acc_map.dilate_iter", dilate_iter);
+            if (dilate_iter < 1) {
+                dilate_iter = 1;
+            }
+            use_static_map =
+                node.declare_parameter<bool>("rose_map.acc_map.use_static_map", use_static_map);
+            static_map_path = node.declare_parameter<std::string>(
+                "rose_map.acc_map.static_map_path",
+                static_map_path
+            );
         }
     } acc_map_params;
 
@@ -61,5 +80,12 @@ public:
                 node.declare_parameter<bool>("rose_map.esdf.use_diagonals", use_diagonals);
         }
     } esdf_params;
+    struct InfMapParams {
+        int inflation_step = 1;
+        void load(rclcpp::Node& node) {
+            inflation_step =
+                node.declare_parameter<int>("rose_map.inf_map.inflation_step", inflation_step);
+        }
+    } inf_map_params;
 };
 } // namespace rose_map
