@@ -91,7 +91,7 @@ public:
         if (idx < 0)
             return params_.occ_map_params.unknown_is_occupied;
 
-        const Cell& c = grid_[idx];
+        const Cell& c = occ_map_info_.grid_[idx];
         if (now - c.last_update > params_.occ_map_params.timeout)
             return false;
 
@@ -100,7 +100,7 @@ public:
 
     void update(Clock now);
     Eigen::Vector3f origin() const {
-        return origin_;
+        return occ_map_info_.origin_;
     }
     std::vector<Eigen::Vector4f> getOccupiedPoints(float sample_resolution_m = -0.05) const;
 
@@ -128,99 +128,6 @@ public:
 
     void commitFree(Clock t);
 
-    void raycastFreeKey(const VoxelKey3D& o, const VoxelKey3D& h) {
-        if (o.x == h.x && o.y == h.y && o.z == h.z)
-            return;
-
-        int x = o.x, y = o.y, z = o.z;
-        int dx = std::abs(h.x - x);
-        int dy = std::abs(h.y - y);
-        int dz = std::abs(h.z - z);
-
-        int sx = (h.x > x) ? 1 : -1;
-        int sy = (h.y > y) ? 1 : -1;
-        int sz = (h.z > z) ? 1 : -1;
-
-        float tMaxX = 0.5f, tMaxY = 0.5f, tMaxZ = 0.5f;
-        float tDeltaX = dx ? 1.f / dx : std::numeric_limits<float>::infinity();
-        float tDeltaY = dy ? 1.f / dy : std::numeric_limits<float>::infinity();
-        float tDeltaZ = dz ? 1.f / dz : std::numeric_limits<float>::infinity();
-
-        int max_steps = dx + dy + dz + 1;
-        while ((x != h.x || y != h.y || z != h.z) && max_steps--) {
-            for (const auto& n: FREE_D) {
-                int idx = key3DToIndex3D({ x + n[0], y + n[1], z + n[2] });
-                if (idx >= 0)
-                    free_buf_.tryPush(idx, stamp_now_);
-            }
-
-            if (tMaxX < tMaxY) {
-                if (tMaxX < tMaxZ) {
-                    x += sx;
-                    tMaxX += tDeltaX;
-                } else {
-                    z += sz;
-                    tMaxZ += tDeltaZ;
-                }
-            } else {
-                if (tMaxY < tMaxZ) {
-                    y += sy;
-                    tMaxY += tDeltaY;
-                } else {
-                    z += sz;
-                    tMaxZ += tDeltaZ;
-                }
-            }
-        }
-    }
-
-    inline void raycastFreeKeyTLS(const VoxelKey3D& o, const VoxelKey3D& h, std::vector<int>& out) {
-        if (o.x == h.x && o.y == h.y && o.z == h.z)
-            return;
-
-        int x = o.x, y = o.y, z = o.z;
-        int dx = std::abs(h.x - x);
-        int dy = std::abs(h.y - y);
-        int dz = std::abs(h.z - z);
-
-        int sx = (h.x > x) ? 1 : -1;
-        int sy = (h.y > y) ? 1 : -1;
-        int sz = (h.z > z) ? 1 : -1;
-
-        float tMaxX = 0.5f, tMaxY = 0.5f, tMaxZ = 0.5f;
-        float tDeltaX = dx ? 1.f / dx : std::numeric_limits<float>::infinity();
-        float tDeltaY = dy ? 1.f / dy : std::numeric_limits<float>::infinity();
-        float tDeltaZ = dz ? 1.f / dz : std::numeric_limits<float>::infinity();
-
-        int max_steps = dx + dy + dz + 1;
-
-        while ((x != h.x || y != h.y || z != h.z) && max_steps--) {
-            for (const auto& n: FREE_D) {
-                int idx = key3DToIndex3D({ x + n[0], y + n[1], z + n[2] });
-                if (idx >= 0) {
-                    out.push_back(idx);
-                }
-            }
-            // 3D DDA
-            if (tMaxX < tMaxY) {
-                if (tMaxX < tMaxZ) {
-                    x += sx;
-                    tMaxX += tDeltaX;
-                } else {
-                    z += sz;
-                    tMaxZ += tDeltaZ;
-                }
-            } else {
-                if (tMaxY < tMaxZ) {
-                    y += sy;
-                    tMaxY += tDeltaY;
-                } else {
-                    z += sz;
-                    tMaxZ += tDeltaZ;
-                }
-            }
-        }
-    }
     inline void raycastFreeKeyTLS_SyncStep_Parallel(
         const VoxelKey3D& o,
         const std::vector<VoxelKey3D>& h_list,
@@ -230,104 +137,158 @@ public:
     ) {
         tbb::parallel_for(size_t(0), h_list.size(), size_t(32), [&](size_t i) {
             auto& out = tls_free.local();
-            int x = o.x, y = o.y, z = o.z;
-            int sx = (h_list[i].x > x) ? 1 : -1;
-            int sy = (h_list[i].y > y) ? 1 : -1;
-            int sz = (h_list[i].z > z) ? 1 : -1;
 
-            size_t steps = max_steps[i];
-            if (steps > max_range_vox)
-                steps = max_range_vox;
+            const int tx = h_list[i].x;
+            const int ty = h_list[i].y;
+            const int tz = h_list[i].z;
 
-            for (size_t s = 0; s < steps; ++s) {
-                if (x == h_list[i].x && y == h_list[i].y && z == h_list[i].z)
+            const float px = o.x + 0.5f;
+            const float py = o.y + 0.5f;
+            const float pz = o.z + 0.5f;
+            const float tpx = tx + 0.5f;
+            const float tpy = ty + 0.5f;
+            const float tpz = tz + 0.5f;
+
+            float dx = tpx - px;
+            float dy = tpy - py;
+            float dz = tpz - pz;
+            const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (len < 1e-6f)
+                return;
+            const float invLen = 1.0f / len;
+            dx *= invLen;
+            dy *= invLen;
+            dz *= invLen;
+
+            int cx = o.x, cy = o.y, cz = o.z;
+
+            const int stepX = (dx > 0.f) - (dx < 0.f);
+            const int stepY = (dy > 0.f) - (dy < 0.f);
+            const int stepZ = (dz > 0.f) - (dz < 0.f);
+
+            const float tDeltaX = (std::abs(dx) > 1e-6f) ? std::abs(1.0f / dx)
+                                                         : std::numeric_limits<float>::infinity();
+            const float tDeltaY = (std::abs(dy) > 1e-6f) ? std::abs(1.0f / dy)
+                                                         : std::numeric_limits<float>::infinity();
+            const float tDeltaZ = (std::abs(dz) > 1e-6f) ? std::abs(1.0f / dz)
+                                                         : std::numeric_limits<float>::infinity();
+
+            float tMaxX = (std::abs(dx) > 1e-6f) ? ((stepX > 0 ? cx + 1.f : cx) - px) / dx
+                                                 : std::numeric_limits<float>::infinity();
+            float tMaxY = (std::abs(dy) > 1e-6f) ? ((stepY > 0 ? cy + 1.f : cy) - py) / dy
+                                                 : std::numeric_limits<float>::infinity();
+            float tMaxZ = (std::abs(dz) > 1e-6f) ? ((stepZ > 0 ? cz + 1.f : cz) - pz) / dz
+                                                 : std::numeric_limits<float>::infinity();
+
+            size_t maxStep = max_steps[i];
+            if (maxStep > max_range_vox)
+                maxStep = max_range_vox;
+
+            size_t stepCount = 0;
+
+            while (stepCount < maxStep) {
+                if (cx == tx && cy == ty && cz == tz)
                     break;
+                if (tMaxX < tMaxY) {
+                    if (tMaxX < tMaxZ) {
+                        cx += stepX;
+                        tMaxX += tDeltaX;
+                    } else {
+                        cz += stepZ;
+                        tMaxZ += tDeltaZ;
+                    }
+                } else {
+                    if (tMaxY < tMaxZ) {
+                        cy += stepY;
+                        tMaxY += tDeltaY;
+                    } else {
+                        cz += stepZ;
+                        tMaxZ += tDeltaZ;
+                    }
+                }
 
-                x += sx;
-                y += sy;
-                z += sz;
-
-                int idx = key3DToIndex3D({ x, y, z });
-                if (idx >= 0)
-                    out.push_back(idx);
-                else
+                const int idx = key3DToIndex3D({ cx, cy, cz });
+                if (idx < 0)
                     break;
+                out.push_back(idx);
+                ++stepCount;
             }
         });
     }
 
     inline int key3DToIndex3D(const VoxelKey3D& k) const {
-        const int ox = origin_key_.x;
-        const int oy = origin_key_.y;
-        const int oz = origin_key_.z;
-        const int half_x = nx_ >> 1;
-        const int half_y = ny_ >> 1;
-        const int half_z = nz_ >> 1;
+        const int ox = occ_map_info_.origin_key_.x;
+        const int oy = occ_map_info_.origin_key_.y;
+        const int oz = occ_map_info_.origin_key_.z;
+        const int half_x = occ_map_info_.nx_ >> 1;
+        const int half_y = occ_map_info_.ny_ >> 1;
+        const int half_z = occ_map_info_.nz_ >> 1;
 
         int dx = k.x - ox + half_x;
         int dy = k.y - oy + half_y;
         int dz = k.z - oz + half_z;
 
-        if (dx < 0 || dx >= nx_ || dy < 0 || dy >= ny_ || dz < 0 || dz >= nz_)
+        if (dx < 0 || dx >= occ_map_info_.nx_ || dy < 0 || dy >= occ_map_info_.ny_ || dz < 0
+            || dz >= occ_map_info_.nz_)
             return -1;
 
-        int rx = dx + ox_;
-        if (rx >= nx_)
-            rx -= nx_;
+        int rx = dx + occ_map_info_.ox_;
+        if (rx >= occ_map_info_.nx_)
+            rx -= occ_map_info_.nx_;
         else if (rx < 0)
-            rx += nx_;
+            rx += occ_map_info_.nx_;
 
-        int ry = dy + oy_;
-        if (ry >= ny_)
-            ry -= ny_;
+        int ry = dy + occ_map_info_.oy_;
+        if (ry >= occ_map_info_.ny_)
+            ry -= occ_map_info_.ny_;
         else if (ry < 0)
-            ry += ny_;
+            ry += occ_map_info_.ny_;
 
-        int rz = dz + oz_;
-        if (rz >= nz_)
-            rz -= nz_;
+        int rz = dz + occ_map_info_.oz_;
+        if (rz >= occ_map_info_.nz_)
+            rz -= occ_map_info_.nz_;
         else if (rz < 0)
-            rz += nz_;
+            rz += occ_map_info_.nz_;
 
-        return (rx * ny_ + ry) * nz_ + rz;
+        return (rx * occ_map_info_.ny_ + ry) * occ_map_info_.nz_ + rz;
     }
 
     inline VoxelKey3D index3DToKey3D(int idx) const {
-        const int half_x = nx_ >> 1;
-        const int half_y = ny_ >> 1;
-        const int half_z = nz_ >> 1;
+        const int half_x = occ_map_info_.nx_ >> 1;
+        const int half_y = occ_map_info_.ny_ >> 1;
+        const int half_z = occ_map_info_.nz_ >> 1;
 
         int rz = idx;
-        int qxy = rz / nz_;
-        rz -= qxy * nz_; // 代替 % nz_
+        int qxy = rz / occ_map_info_.nz_;
+        rz -= qxy * occ_map_info_.nz_;
 
         int ry = qxy;
-        int qx = ry / ny_;
-        ry -= qx * ny_; // 代替 % ny_
+        int qx = ry / occ_map_info_.ny_;
+        ry -= qx * occ_map_info_.ny_;
 
         int rx = qx;
 
-        int dx = rx - ox_;
+        int dx = rx - occ_map_info_.ox_;
         if (dx < 0)
-            dx += nx_;
-        else if (dx >= nx_)
-            dx -= nx_;
+            dx += occ_map_info_.nx_;
+        else if (dx >= occ_map_info_.nx_)
+            dx -= occ_map_info_.nx_;
 
-        int dy = ry - oy_;
+        int dy = ry - occ_map_info_.oy_;
         if (dy < 0)
-            dy += ny_;
-        else if (dy >= ny_)
-            dy -= ny_;
+            dy += occ_map_info_.ny_;
+        else if (dy >= occ_map_info_.ny_)
+            dy -= occ_map_info_.ny_;
 
-        int dz = rz - oz_;
+        int dz = rz - occ_map_info_.oz_;
         if (dz < 0)
-            dz += nz_;
-        else if (dz >= nz_)
-            dz -= nz_;
+            dz += occ_map_info_.nz_;
+        else if (dz >= occ_map_info_.nz_)
+            dz -= occ_map_info_.nz_;
 
-        return { origin_key_.x + dx - half_x,
-                 origin_key_.y + dy - half_y,
-                 origin_key_.z + dz - half_z };
+        return { occ_map_info_.origin_key_.x + dx - half_x,
+                 occ_map_info_.origin_key_.y + dy - half_y,
+                 occ_map_info_.origin_key_.z + dz - half_z };
     }
     // inline int key3DToIndex3D(const VoxelKey3D& k) const {
     //     int dx = k.x - origin_key_.x + nx_ / 2;
@@ -360,21 +321,22 @@ public:
     // }
 
     inline VoxelKey3D worldToKey3D(const Eigen::Vector3f& p) const {
-        Eigen::Vector3f q = p / voxel_size_;
+        Eigen::Vector3f q = p / occ_map_info_.voxel_size_;
         return { int(std::floor(q.x())), int(std::floor(q.y())), int(std::floor(q.z())) };
     }
     inline Eigen::Vector3f key3DToWorld(const VoxelKey3D& k) const {
-        return Eigen::Vector3f(k.x, k.y, k.z) * voxel_size_;
+        return Eigen::Vector3f(k.x, k.y, k.z) * occ_map_info_.voxel_size_;
     }
+    struct OccMapInfo {
+        float voxel_size_;
+        Eigen::Vector3f origin_, size_;
 
-    float voxel_size_;
-    Eigen::Vector3f origin_, size_;
+        int nx_, ny_, nz_;
+        std::vector<Cell> grid_;
 
-    int nx_, ny_, nz_;
-    std::vector<Cell> grid_;
-
-    VoxelKey3D origin_key_;
-    int ox_, oy_, oz_;
+        VoxelKey3D origin_key_;
+        int ox_, oy_, oz_;
+    } occ_map_info_;
 
     std::vector<int> occupied_buffer_idx_;
     std::vector<int> occupied_pos_;

@@ -2,7 +2,7 @@
 #include "opencv2/opencv.hpp"
 namespace rose_map {
 AccMap::AccMap(rclcpp::Node& node): OccMap(node) {
-    const int size2d = nx_ * ny_;
+    const int size2d = occ_map_info_.nx_ * occ_map_info_.ny_;
     buf0_ = cv::Mat(1, size2d, CV_8U, cv::Scalar(0));
     buf1_ = cv::Mat(1, size2d, CV_8U, cv::Scalar(0));
     curr_ = &buf0_;
@@ -15,9 +15,8 @@ AccMap::AccMap(rclcpp::Node& node): OccMap(node) {
 void AccMap::update(Clock now) {
     OccMap::update(now);
 
-    const int size2d = nx_ * ny_;
+    const int size2d = occ_map_info_.nx_ * occ_map_info_.ny_;
     cv::Mat* other = (curr_ == &buf0_) ? &buf1_ : &buf0_;
-
     other->setTo(1);
 
     std::vector<int> block_cnt(size2d, 0);
@@ -26,57 +25,56 @@ void AccMap::update(Clock now) {
     for (int idx3d: occupied_buffer_idx_) {
         if (!isOccupied(idx3d, now))
             continue;
-
-        VoxelKey3D k3 = index3DToKey3D(idx3d);
-        int idx2d = key2DToIndex2D({ k3.x, k3.y });
-        if (idx2d >= 0 && !isPassableCached(idx3d, robo_base)) {
-            block_cnt[idx2d]++;
+        if (!isPassableCached(idx3d, robo_base)) {
+            VoxelKey3D k3 = index3DToKey3D(idx3d);
+            int idx2d = key2DToIndex2D({ k3.x, k3.y });
+            if (idx2d >= 0)
+                block_cnt[idx2d]++;
         }
     }
 
     for (int i = 0; i < size2d; ++i) {
         bool blocked = false;
-
         if (block_cnt[i] >= params_.acc_map_params.min_block_count)
             blocked = true;
-
         if (params_.acc_map_params.block_ratio > 0.0f) {
-            float ratio = float(block_cnt[i]) / float(nz_);
+            float ratio = float(block_cnt[i]) / float(occ_map_info_.nz_);
             blocked = (ratio >= params_.acc_map_params.block_ratio);
         }
-
         if (!blocked && has_image_map_) {
             auto key2d = index2DToKey2D(i);
             Eigen::Vector3f pw3 = key2DToWorld(key2d);
             Eigen::Vector2f pw(pw3.x(), pw3.y());
-
             int ix, iy;
             if (worldToImage(pw, ix, iy)) {
                 if (image_mask_[iy * image_width_ + ix] == 0)
                     blocked = true;
             }
         }
-
-        (*other).at<uint8_t>(0, i) = blocked ? 1 : 0;
+        other->at<uint8_t>(0, i) = blocked ? 1 : 0;
     }
 
-    cv::Mat map2d(ny_, nx_, CV_8UC1, other->data);
+    cv::Mat map2d(occ_map_info_.ny_, occ_map_info_.nx_, CV_8UC1, other->data);
 
-    cv::Mat kernel = cv::getStructuringElement(
+    applyMorphology(map2d);
+
+    cv::imshow("mask", map2d * 255);
+    cv::waitKey(1);
+
+    curr_ = other;
+}
+
+void AccMap::applyMorphology(cv::Mat& img) {
+    static cv::Mat kernel = cv::getStructuringElement(
         cv::MORPH_RECT,
         cv::Size(params_.acc_map_params.kernel_size, params_.acc_map_params.kernel_size)
     );
 
-    cv::morphologyEx(map2d, map2d, cv::MORPH_CLOSE, kernel);
+    cv::medianBlur(img, img, 1);
 
-    cv::dilate(map2d, map2d, kernel, cv::Point(-1, -1), params_.acc_map_params.dilate_iter);
-
-    cv::threshold(map2d, map2d, 0, 1, cv::THRESH_BINARY);
-
-    // cv::imshow("mask", map2d * 255);
-    // cv::waitKey(1);
-
-    curr_ = other;
+    cv::morphologyEx(img, img, cv::MORPH_CLOSE, kernel);
+    cv::dilate(img, img, kernel, cv::Point(-1, -1), params_.acc_map_params.dilate_iter);
+    cv::threshold(img, img, 0, 1, cv::THRESH_BINARY);
 }
 
 bool AccMap::loadRosMapYaml(const std::string& yaml_path) {
@@ -122,7 +120,7 @@ bool AccMap::loadRosMapYaml(const std::string& yaml_path) {
 
 std::vector<Eigen::Vector4f> AccMap::getOccupiedPoints() const {
     std::vector<Eigen::Vector4f> pts;
-    pts.reserve(nx_ * ny_ / 8 + 16);
+    pts.reserve(occ_map_info_.nx_ * occ_map_info_.ny_ / 8 + 16);
 
     const int N = curr_->total(); // 取 Mat 元素总数
 

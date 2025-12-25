@@ -25,11 +25,9 @@ rose_map:
         min_diff_z: 0.0
         min_block_count: 1
         block_ratio: 0.1
-        kernel_size: 5
+        kernel_size: 3
         dilate_iter: 2
         use_static_map: false
         static_map_path: ""
       esdf:
         use_diagonals: true
-      inf_map:
-        inflation_step: 1
