@@ -6,29 +6,19 @@
 namespace rose_map {
 
 OccMap::OccMap(rclcpp::Node& node) {
-    occ_map_info_.voxel_size_ = node.declare_parameter<float>("rose_map.voxel_size", 0.05);
-
-    std::vector<double> size_vec = node.declare_parameter<std::vector<double>>(
-        "rose_map.size",
-        std::vector<double> { 5.0, 5.0, 5.0 }
-    );
-    occ_map_info_.size_ = Eigen::Vector3f(size_vec[0], size_vec[1], size_vec[2]);
-
-    std::vector<double> origin_vec = node.declare_parameter<std::vector<double>>(
-        "rose_map.origin",
-        std::vector<double> { 5.0, 5.0, 5.0 }
-    );
-    occ_map_info_.origin_ = Eigen::Vector3f(origin_vec[0], origin_vec[1], origin_vec[2]);
-
     params_.load(node);
+    occ_map_info_.voxel_size_ = params_.occ_map_params.voxel_size;
+
+    occ_map_info_.size_ = params_.occ_map_params.size;
+    occ_map_info_.origin_ = params_.occ_map_params.origin;
 
     Eigen::Vector3f half = occ_map_info_.size_ * 0.5f;
-    min_key_ = worldToKey3D(occ_map_info_.origin_ - half);
-    max_key_ = worldToKey3D(occ_map_info_.origin_ + half);
+    occ_map_info_.min_key_ = worldToKey3D(occ_map_info_.origin_ - half);
+    occ_map_info_.max_key_ = worldToKey3D(occ_map_info_.origin_ + half);
 
-    occ_map_info_.nx_ = max_key_.x - min_key_.x + 1;
-    occ_map_info_.ny_ = max_key_.y - min_key_.y + 1;
-    occ_map_info_.nz_ = max_key_.z - min_key_.z + 1;
+    occ_map_info_.nx_ = occ_map_info_.max_key_.x - occ_map_info_.min_key_.x + 1;
+    occ_map_info_.ny_ = occ_map_info_.max_key_.y - occ_map_info_.min_key_.y + 1;
+    occ_map_info_.nz_ = occ_map_info_.max_key_.z - occ_map_info_.min_key_.z + 1;
 
     const size_t N = static_cast<size_t>(occ_map_info_.nx_) * occ_map_info_.ny_ * occ_map_info_.nz_;
     occ_map_info_.grid_.resize(N);
@@ -223,6 +213,9 @@ void OccMap::setOrigin(const Eigen::Vector3f& o) {
     slideAxis(2, shift.z);
     occ_map_info_.origin_key_ = new_origin;
     occ_map_info_.origin_ = o;
+    Eigen::Vector3f half = occ_map_info_.size_ * 0.5f;
+    occ_map_info_.min_key_ = worldToKey3D(occ_map_info_.origin_ - half);
+    occ_map_info_.max_key_ = worldToKey3D(occ_map_info_.origin_ + half);
 }
 
 void OccMap::slideAxis(int axis, int shift) {

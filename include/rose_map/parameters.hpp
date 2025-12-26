@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Eigen/Dense>
 #include <rclcpp/node.hpp>
 namespace rose_map {
 class Parameters {
@@ -11,6 +12,9 @@ public:
         inf_map_params.load(node);
     }
     struct OccMapParams {
+        float voxel_size;
+        Eigen::Vector3f origin;
+        Eigen::Vector3f size;
         float log_hit = 0.85f;
         float log_free = -0.4f;
         float log_min = -5.f;
@@ -22,6 +26,17 @@ public:
         bool unknown_is_occupied = false;
         bool use_ray = true;
         void load(rclcpp::Node& node) {
+            voxel_size = node.declare_parameter<float>("rose_map.occ_map.voxel_size", voxel_size);
+            std::vector<double> size_vec = node.declare_parameter<std::vector<double>>(
+                "rose_map.occ_map.size",
+                std::vector<double> { 5.0, 5.0, 5.0 }
+            );
+            size = Eigen::Vector3f(size_vec[0], size_vec[1], size_vec[2]);
+            std::vector<double> origin_vec = node.declare_parameter<std::vector<double>>(
+                "rose_map.occ_map.origin",
+                std::vector<double> { 5.0, 5.0, 5.0 }
+            );
+            origin = Eigen::Vector3f(origin_vec[0], origin_vec[1], origin_vec[2]);
             log_hit = node.declare_parameter<float>("rose_map.occ_map.log_hit", log_hit);
             log_free = node.declare_parameter<float>("rose_map.occ_map.log_free", log_free);
             log_min = node.declare_parameter<float>("rose_map.occ_map.log_min", log_min);
@@ -39,6 +54,9 @@ public:
         }
     } occ_map_params;
     struct AccMapParams {
+        float voxel_size;
+        Eigen::Vector2f origin;
+        Eigen::Vector2f size;
         float origin2base = 0.0;
         float min_diff_z = 0.0;
 
@@ -49,6 +67,17 @@ public:
         int dilate_iter = 1;
         std::string static_map_path;
         void load(rclcpp::Node& node) {
+            voxel_size = node.declare_parameter<float>("rose_map.acc_map.voxel_size", voxel_size);
+            std::vector<double> size_vec = node.declare_parameter<std::vector<double>>(
+                "rose_map.acc_map.size",
+                std::vector<double> { 5.0, 5.0 }
+            );
+            size = Eigen::Vector2f(size_vec[0], size_vec[1]);
+            std::vector<double> origin_vec = node.declare_parameter<std::vector<double>>(
+                "rose_map.acc_map.origin",
+                std::vector<double> { 5.0, 5.0 }
+            );
+            origin = Eigen::Vector2f(origin_vec[0], origin_vec[1]);
             origin2base =
                 node.declare_parameter<float>("rose_map.acc_map.origin2base", origin2base);
             min_diff_z = node.declare_parameter<float>("rose_map.acc_map.min_diff_z", min_diff_z);

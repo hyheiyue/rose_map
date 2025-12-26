@@ -2,20 +2,58 @@
 #include "opencv2/opencv.hpp"
 namespace rose_map {
 AccMap::AccMap(rclcpp::Node& node): OccMap(node) {
-    const int size2d = occ_map_info_.nx_ * occ_map_info_.ny_;
-    buf0_ = cv::Mat(1, size2d, CV_8U, cv::Scalar(0));
-    buf1_ = cv::Mat(1, size2d, CV_8U, cv::Scalar(0));
-    curr_ = &buf0_;
+    acc_map_info_.voxel_size_ = params_.acc_map_params.voxel_size;
 
+    acc_map_info_.size_ = params_.acc_map_params.size;
+    acc_map_info_.origin_ = params_.acc_map_params.origin;
+
+    Eigen::Vector2f half = acc_map_info_.size_ * 0.5f;
+    acc_map_info_.min_key_ = worldToKey2D(acc_map_info_.origin_ - half);
+    acc_map_info_.max_key_ = worldToKey2D(acc_map_info_.origin_ + half);
+
+    acc_map_info_.nx_ = acc_map_info_.max_key_.x - acc_map_info_.min_key_.x + 1;
+    acc_map_info_.ny_ = acc_map_info_.max_key_.y - acc_map_info_.min_key_.y + 1;
     if (params_.acc_map_params.use_static_map) {
         loadRosMapYaml(params_.acc_map_params.static_map_path);
     }
+    if (has_image_map_) {
+        Eigen::Vector2f center_world;
+        center_world.x() = image_origin_.x() + image_width_ * image_resolution_ * 0.5f;
+        center_world.y() = image_origin_.y() + image_height_ * image_resolution_ * 0.5f;
+
+        acc_map_info_.origin_ = center_world;
+
+        Eigen::Vector2f world_size_img;
+        world_size_img.x() = image_width_ * image_resolution_;
+        world_size_img.y() = image_height_ * image_resolution_;
+
+        Eigen::Vector2f half_img = world_size_img * 0.5f;
+        acc_map_info_.min_key_ = worldToKey2D(acc_map_info_.origin_ - half_img);
+        acc_map_info_.max_key_ = worldToKey2D(acc_map_info_.origin_ + half_img);
+
+        acc_map_info_.nx_ = acc_map_info_.max_key_.x - acc_map_info_.min_key_.x + 1;
+        acc_map_info_.ny_ = acc_map_info_.max_key_.y - acc_map_info_.min_key_.y + 1;
+        acc_map_info_.origin_key_ = worldToKey2D(acc_map_info_.origin_);
+    }
+
+    const int size2d = acc_map_info_.nx_ * acc_map_info_.ny_;
+    buf0_ = cv::Mat(1, size2d, CV_8U, cv::Scalar(0));
+    buf1_ = cv::Mat(1, size2d, CV_8U, cv::Scalar(0));
+    curr_ = &buf0_;
 }
-// update 逻辑不变，仅存储改为 Mat
+
 void AccMap::update(Clock now) {
     OccMap::update(now);
+    if (!has_image_map_) {
+        VoxelKey2D new_origin = worldToKey2D(acc_map_info_.tmp_origin_);
+        acc_map_info_.origin_ = acc_map_info_.tmp_origin_;
+        acc_map_info_.origin_key_ = new_origin;
+        Eigen::Vector2f half = acc_map_info_.size_ * 0.5f;
+        acc_map_info_.min_key_ = worldToKey2D(acc_map_info_.origin_ - half);
+        acc_map_info_.max_key_ = worldToKey2D(acc_map_info_.origin_ + half);
+    }
 
-    const int size2d = occ_map_info_.nx_ * occ_map_info_.ny_;
+    const int size2d = acc_map_info_.nx_ * acc_map_info_.ny_;
     cv::Mat* other = (curr_ == &buf0_) ? &buf1_ : &buf0_;
     other->setTo(1);
 
@@ -26,8 +64,8 @@ void AccMap::update(Clock now) {
         if (!isOccupied(idx3d, now))
             continue;
         if (!isPassableCached(idx3d, robo_base)) {
-            VoxelKey3D k3 = index3DToKey3D(idx3d);
-            int idx2d = key2DToIndex2D({ k3.x, k3.y });
+            auto w3d = key3DToWorld(index3DToKey3D(idx3d));
+            int idx2d = key2DToIndex2D(worldToKey2D({ w3d.x(), w3d.y() }));
             if (idx2d >= 0)
                 block_cnt[idx2d]++;
         }
@@ -38,7 +76,7 @@ void AccMap::update(Clock now) {
         if (block_cnt[i] >= params_.acc_map_params.min_block_count)
             blocked = true;
         if (params_.acc_map_params.block_ratio > 0.0f) {
-            float ratio = float(block_cnt[i]) / float(occ_map_info_.nz_);
+            float ratio = float(block_cnt[i]) / float(occ_map_info_.nz_*(acc_map_info_.voxel_size_/occ_map_info_.voxel_size_));
             blocked = (ratio >= params_.acc_map_params.block_ratio);
         }
         if (!blocked && has_image_map_) {
@@ -54,7 +92,7 @@ void AccMap::update(Clock now) {
         other->at<uint8_t>(0, i) = blocked ? 1 : 0;
     }
 
-    cv::Mat map2d(occ_map_info_.ny_, occ_map_info_.nx_, CV_8UC1, other->data);
+    cv::Mat map2d(acc_map_info_.ny_, acc_map_info_.nx_, CV_8UC1, other->data);
 
     applyMorphology(map2d);
 
@@ -120,7 +158,7 @@ bool AccMap::loadRosMapYaml(const std::string& yaml_path) {
 
 std::vector<Eigen::Vector4f> AccMap::getOccupiedPoints() const {
     std::vector<Eigen::Vector4f> pts;
-    pts.reserve(occ_map_info_.nx_ * occ_map_info_.ny_ / 8 + 16);
+    pts.reserve(acc_map_info_.nx_ * acc_map_info_.ny_ / 8 + 16);
 
     const int N = curr_->total(); // 取 Mat 元素总数
 

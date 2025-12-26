@@ -32,87 +32,69 @@ public:
         return occ_map_info_.origin_
             - Eigen::Vector3f(0.0f, 0.0f, params_.acc_map_params.origin2base);
     }
-
+    void setOrigin(const Eigen::Vector3f& o) {
+        OccMap::setOrigin(o);
+        acc_map_info_.tmp_origin_ = Eigen::Vector2f(o.x(), o.y());
+    }
     inline int key2DToIndex2D(const VoxelKey2D& k) const {
-        const int ox = occ_map_info_.origin_key_.x;
-        const int oy = occ_map_info_.origin_key_.y;
-        const int half_x = occ_map_info_.nx_ >> 1;
-        const int half_y = occ_map_info_.ny_ >> 1;
+        const int ox = acc_map_info_.origin_key_.x;
+        const int oy = acc_map_info_.origin_key_.y;
+        const int half_x = acc_map_info_.nx_ >> 1;
+        const int half_y = acc_map_info_.ny_ >> 1;
 
         int dx = k.x - ox + half_x;
         int dy = k.y - oy + half_y;
 
-        if (dx < 0 || dx >= occ_map_info_.nx_ || dy < 0 || dy >= occ_map_info_.ny_)
+        if (dx < 0 || dx >= acc_map_info_.nx_ || dy < 0 || dy >= acc_map_info_.ny_)
             return -1;
 
-        int rx = dx + occ_map_info_.ox_;
-        if (rx >= occ_map_info_.nx_)
-            rx -= occ_map_info_.nx_;
+        int rx = dx;
+        if (rx >= acc_map_info_.nx_)
+            rx -= acc_map_info_.nx_;
         else if (rx < 0)
-            rx += occ_map_info_.nx_;
+            rx += acc_map_info_.nx_;
 
-        int ry = dy + occ_map_info_.oy_;
-        if (ry >= occ_map_info_.ny_)
-            ry -= occ_map_info_.ny_;
+        int ry = dy;
+        if (ry >= acc_map_info_.ny_)
+            ry -= acc_map_info_.ny_;
         else if (ry < 0)
-            ry += occ_map_info_.ny_;
+            ry += acc_map_info_.ny_;
 
-        return rx + ry * occ_map_info_.nx_;
+        return rx + ry * acc_map_info_.nx_;
     }
 
     inline VoxelKey2D index2DToKey2D(int idx) const {
-        const int half_x = occ_map_info_.nx_ >> 1;
-        const int half_y = occ_map_info_.ny_ >> 1;
+        const int ox = acc_map_info_.origin_key_.x;
+        const int oy = acc_map_info_.origin_key_.y;
+        const int half_x = acc_map_info_.nx_ >> 1;
+        const int half_y = acc_map_info_.ny_ >> 1;
 
-        int ry = idx / occ_map_info_.nx_;
-        int rx = idx - ry * occ_map_info_.nx_;
+        int ry = idx / acc_map_info_.nx_;
+        int rx = idx - ry * acc_map_info_.nx_;
 
-        int dx = rx - occ_map_info_.ox_;
+        int dx = rx;
         if (dx < 0)
-            dx += occ_map_info_.nx_;
-        else if (dx >= occ_map_info_.nx_)
-            dx -= occ_map_info_.nx_;
+            dx += acc_map_info_.nx_;
+        else if (dx >= acc_map_info_.nx_)
+            dx -= acc_map_info_.nx_;
 
-        int dy = ry - occ_map_info_.oy_;
+        int dy = ry;
         if (dy < 0)
-            dy += occ_map_info_.ny_;
-        else if (dy >= occ_map_info_.ny_)
-            dy -= occ_map_info_.ny_;
+            dy += acc_map_info_.ny_;
+        else if (dy >= acc_map_info_.ny_)
+            dy -= acc_map_info_.ny_;
 
-        return { occ_map_info_.origin_key_.x + dx - half_x,
-                 occ_map_info_.origin_key_.y + dy - half_y };
+        return { ox + dx - half_x, oy + dy - half_y };
     }
-    // inline int key2DToIndex2D(const VoxelKey2D& k) const {
-    //     int dx = k.x - origin_key_.x + nx_ / 2;
-    //     int dy = k.y - origin_key_.y + ny_ / 2;
 
-    //     if ((unsigned)dx >= (unsigned)nx_ || (unsigned)dy >= (unsigned)ny_) {
-    //         return -1;
-    //     }
-
-    //     int rx = (dx + ox_) % nx_;
-    //     int ry = (dy + oy_) % ny_;
-
-    //     return rx + ry * nx_;
-    // }
-
-    // inline VoxelKey2D index2DToKey2D(int idx) const {
-    //     int ry = idx / nx_;
-    //     int rx = idx % nx_;
-
-    //     int dx = (rx - ox_ + nx_) % nx_;
-    //     int dy = (ry - oy_ + ny_) % ny_;
-
-    //     return { origin_key_.x + dx - nx_ / 2, origin_key_.y + dy - ny_ / 2 };
-    // }
     inline VoxelKey2D worldToKey2D(const Eigen::Vector2f& p) const {
-        Eigen::Vector2f q = p / occ_map_info_.voxel_size_;
+        Eigen::Vector2f q = p / acc_map_info_.voxel_size_;
         return { static_cast<int>(std::floor(q.x())), static_cast<int>(std::floor(q.y())) };
     }
 
     inline Eigen::Vector3f key2DToWorld(const VoxelKey2D& k) const {
         Eigen::Vector3f p(static_cast<float>(k.x), static_cast<float>(k.y), 0.0f);
-        p *= occ_map_info_.voxel_size_;
+        p *= acc_map_info_.voxel_size_;
         p.z() = getRoboBase().z();
         return p;
     }
@@ -175,6 +157,16 @@ public:
 
         return true;
     }
+    struct AccMapInfo {
+        float voxel_size_;
+        Eigen::Vector2f origin_, size_;
+        Eigen::Vector2f tmp_origin_;
+        int nx_, ny_;
+
+        VoxelKey2D origin_key_;
+        VoxelKey2D min_key_, max_key_;
+    } acc_map_info_;
+
     cv::Mat buf0_;
     cv::Mat buf1_;
     cv::Mat* curr_ { nullptr };

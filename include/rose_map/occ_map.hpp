@@ -336,6 +336,7 @@ public:
 
         VoxelKey3D origin_key_;
         int ox_, oy_, oz_;
+        VoxelKey3D min_key_, max_key_;
     } occ_map_info_;
 
     std::vector<int> occupied_buffer_idx_;
@@ -345,7 +346,7 @@ public:
     StampedIndexBuffer fall_buf_; // occupied → free/unknown
     std::vector<int8_t> prev_occupied_; // 记录上一帧是否 occupied
     uint32_t stamp_now_ = 1;
-    VoxelKey3D min_key_, max_key_;
+
     Clock now_;
 
     Parameters params_;

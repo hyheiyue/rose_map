@@ -8,7 +8,7 @@ def generate_launch_description():
     rose_map_node = Node(
         package="rose_map",
         executable="rose_map_node",
-        name="rose_map",
+        name="rose_map_node",
         output="screen",
         parameters=[
             PathJoinSubstitution(
