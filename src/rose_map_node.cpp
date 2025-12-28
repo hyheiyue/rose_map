@@ -13,12 +13,29 @@ public:
         );
     }
     void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
-        auto odom = *msg;
-        rose_map_->setOrigin(Eigen::Vector3f(
+        const auto& odom = *msg;
+
+        Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
+        try {
+            auto tf = rose_map_->tf_buffer_.lookupTransform(
+                rose_map_->target_frame_,
+                odom.header.frame_id,
+                odom.header.stamp
+            );
+            T = rose_map_->tf2ToEigen(tf);
+        } catch (...) {
+            RCLCPP_WARN(this->get_logger(), "[OccMap] Odom TF transform failed → using identity");
+        }
+
+        Eigen::Vector4f p(
             odom.pose.pose.position.x,
             odom.pose.pose.position.y,
-            odom.pose.pose.position.z
-        ));
+            odom.pose.pose.position.z,
+            1.0f
+        );
+        p = T * p;
+
+        rose_map_->setOrigin(Eigen::Vector3f(p.x(), p.y(), p.z()));
     }
     RoseMap::Ptr rose_map_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_sub_;

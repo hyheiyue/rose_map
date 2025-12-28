@@ -25,7 +25,7 @@ public:
             rclcpp::SensorDataQoS(),
             std::bind(&RoseMap::pointCloudCallback, this, std::placeholders::_1)
         );
-
+        target_frame_ = node.declare_parameter<std::string>("rose_map.target_frame", "odom");
         occ_map_pub_ =
             node.create_publisher<sensor_msgs::msg::PointCloud2>("occ_map_out", rclcpp::QoS(10));
         acc_map_pub_ =
@@ -37,23 +37,34 @@ public:
         return std::make_shared<RoseMap>(node);
     }
     void pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+        // 计算相对 ROS 起始时间
         const double ros_time = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
-
         static double t_init = -1.0;
         if (t_init < 0.0)
             t_init = ros_time;
-
         current_time_ = static_cast<Clock>(ros_time - t_init);
-        sensor_msgs::PointCloud2ConstIterator<float> iter_x(*msg, "x");
-        sensor_msgs::PointCloud2ConstIterator<float> iter_y(*msg, "y");
-        sensor_msgs::PointCloud2ConstIterator<float> iter_z(*msg, "z");
-
+        Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
+        try {
+            auto tf =
+                tf_buffer_.lookupTransform(target_frame_, msg->header.frame_id, msg->header.stamp);
+            T = tf2ToEigen(tf);
+        } catch (...) {
+            RCLCPP_WARN(node_->get_logger(), "[OccMap] TF transform failed → using identity");
+        }
         const size_t size = msg->width * msg->height;
         std::vector<Eigen::Vector3f> pts;
         pts.reserve(size);
 
+        sensor_msgs::PointCloud2ConstIterator<float> iter_x(*msg, "x");
+        sensor_msgs::PointCloud2ConstIterator<float> iter_y(*msg, "y");
+        sensor_msgs::PointCloud2ConstIterator<float> iter_z(*msg, "z");
+
         for (size_t i = 0; i < size; ++i) {
-            pts.emplace_back(*iter_x, *iter_y, *iter_z);
+            Eigen::Vector4f p(*iter_x, *iter_y, *iter_z, 1.0f);
+            p = T * p;
+
+            pts.emplace_back(p.x(), p.y(), p.z());
+
             ++iter_x;
             ++iter_y;
             ++iter_z;
@@ -63,7 +74,7 @@ public:
 
         Eigen::Vector3f sensor_origin;
         try {
-            sensor_origin = lookupTF(msg->header.frame_id, sensor_frame_, msg->header.stamp);
+            sensor_origin = lookupTF(target_frame_, sensor_frame_, msg->header.stamp);
         } catch (...) {
             RCLCPP_WARN(
                 node_->get_logger(),
@@ -72,38 +83,40 @@ public:
             );
             sensor_origin = origin();
         }
-
         insertPointCloud(pts, sensor_origin, current_time_);
 
+        // 地图更新与发布逻辑
         static auto last_map_update_tp = std::chrono::steady_clock::now();
-
         const auto now_sys = std::chrono::steady_clock::now();
 
         if (std::chrono::duration<double>(now_sys - last_map_update_tp).count() >= max_update_dt_) {
             update(current_time_);
             last_map_update_tp = now_sys;
+
             if (publisherSubscribed(occ_map_pub_)) {
                 sensor_msgs::msg::PointCloud2 occ_msg;
-                occ_msg.header = msg->header;
+                occ_msg.header.stamp = msg->header.stamp;
+                occ_msg.header.frame_id = target_frame_;
                 auto cloud = OccMap::getOccupiedPoints();
                 pubPointcloud(cloud, occ_msg, occ_map_pub_);
             }
 
             if (publisherSubscribed(acc_map_pub_)) {
                 sensor_msgs::msg::PointCloud2 acc_msg;
-                acc_msg.header = msg->header;
+                acc_msg.header.stamp = msg->header.stamp;
+                acc_msg.header.frame_id = target_frame_;
                 auto cloud = AccMap::getOccupiedPoints();
                 pubPointcloud(cloud, acc_msg, acc_map_pub_);
             }
 
             if (publisherSubscribed(esdf_map_pub_)) {
-                sensor_msgs::msg::PointCloud2 map_msg;
-                map_msg.header = msg->header;
+                sensor_msgs::msg::PointCloud2 esdf_msg;
+                esdf_msg.header.stamp = msg->header.stamp;
+                esdf_msg.header.frame_id = target_frame_;
                 auto cloud = ESDF::getOccupiedPoints();
-                pubPointcloud(cloud, map_msg, esdf_map_pub_);
+                pubPointcloud(cloud, esdf_msg, esdf_map_pub_);
             }
         }
-
         const auto t1 = std::chrono::steady_clock::now();
         const double cost_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
@@ -127,6 +140,20 @@ public:
             last_report_tp_ = now_sys;
         }
     }
+
+    Eigen::Matrix4f tf2ToEigen(const geometry_msgs::msg::TransformStamped& tf) {
+        Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
+        const auto& t = tf.transform.translation;
+        const auto& q = tf.transform.rotation;
+
+        Eigen::Quaternionf Q(q.w, q.x, q.y, q.z);
+        T.block<3, 3>(0, 0) = Q.toRotationMatrix();
+        T(0, 3) = t.x;
+        T(1, 3) = t.y;
+        T(2, 3) = t.z;
+        return T;
+    }
+
     Eigen::Vector3f
     lookupTF(const std::string& parent, const std::string& child, const rclcpp::Time& stamp) {
         geometry_msgs::msg::TransformStamped tf;
@@ -196,7 +223,7 @@ public:
     std::chrono::steady_clock::time_point last_report_tp_;
     rclcpp::Node* node_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_sub_;
-
+    std::string target_frame_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr occ_map_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr acc_map_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr esdf_map_pub_;

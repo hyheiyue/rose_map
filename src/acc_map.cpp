@@ -24,8 +24,8 @@ AccMap::AccMap(rclcpp::Node& node): OccMap(node) {
         acc_map_info_.origin_ = center_world;
 
         Eigen::Vector2f world_size_img;
-        world_size_img.x() = image_width_ * image_resolution_;
-        world_size_img.y() = image_height_ * image_resolution_;
+        world_size_img.x() = image_width_ * image_resolution_ + 1;
+        world_size_img.y() = image_height_ * image_resolution_ + 1;
 
         Eigen::Vector2f half_img = world_size_img * 0.5f;
         acc_map_info_.min_key_ = worldToKey2D(acc_map_info_.origin_ - half_img);
@@ -76,7 +76,9 @@ void AccMap::update(Clock now) {
         if (block_cnt[i] >= params_.acc_map_params.min_block_count)
             blocked = true;
         if (params_.acc_map_params.block_ratio > 0.0f) {
-            float ratio = float(block_cnt[i]) / float(occ_map_info_.nz_*(acc_map_info_.voxel_size_/occ_map_info_.voxel_size_));
+            float ratio = float(block_cnt[i])
+                / float(occ_map_info_.nz_ * (acc_map_info_.voxel_size_ / occ_map_info_.voxel_size_)
+                );
             blocked = (ratio >= params_.acc_map_params.block_ratio);
         }
         if (!blocked && has_image_map_) {
