@@ -3,7 +3,9 @@
 namespace rose_map {
 class RoseMapNode: public rclcpp::Node {
 public:
-    RoseMapNode(const rclcpp::NodeOptions& options): Node("rose_map_node", options) {
+    RoseMapNode(const rclcpp::NodeOptions& options):
+        Node("rose_map_node", options),
+        tf_buffer_(this->get_clock()) {
         rose_map_ = std::make_shared<RoseMap>(*this);
         std::string odom_topic = this->declare_parameter<std::string>("odom_topic", "");
         odometry_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
@@ -17,12 +19,12 @@ public:
 
         Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
         try {
-            auto tf = rose_map_->tf_buffer_.lookupTransform(
+            auto tf = tf_buffer_.lookupTransform(
                 rose_map_->target_frame_,
                 odom.header.frame_id,
                 odom.header.stamp
             );
-            T = rose_map_->tf2ToEigen(tf);
+            T = tf2ToEigen(tf);
         } catch (...) {
             RCLCPP_WARN(this->get_logger(), "[OccMap] Odom TF transform failed → using identity");
         }
@@ -37,8 +39,22 @@ public:
 
         rose_map_->setOrigin(Eigen::Vector3f(p.x(), p.y(), p.z()));
     }
+    Eigen::Matrix4f tf2ToEigen(const geometry_msgs::msg::TransformStamped& tf) {
+        Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
+        const auto& t = tf.transform.translation;
+        const auto& q = tf.transform.rotation;
+
+        Eigen::Quaternionf Q(q.w, q.x, q.y, q.z);
+        T.block<3, 3>(0, 0) = Q.toRotationMatrix();
+        T(0, 3) = t.x;
+        T(1, 3) = t.y;
+        T(2, 3) = t.z;
+        return T;
+    }
     RoseMap::Ptr rose_map_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_sub_;
+    tf2_ros::Buffer tf_buffer_;
+    tf2_ros::TransformListener tf_listener_ { tf_buffer_ };
 };
 
 }; // namespace rose_map
