@@ -26,7 +26,7 @@ AccMap::AccMap(rclcpp::Node& node): OccMap(node) {
         Eigen::Vector2f world_size_img;
         world_size_img.x() = image_width_ * image_resolution_ + 1;
         world_size_img.y() = image_height_ * image_resolution_ + 1;
-
+        acc_map_info_.size_ = world_size_img;
         Eigen::Vector2f half_img = world_size_img * 0.5f;
         acc_map_info_.min_key_ = worldToKey2D(acc_map_info_.origin_ - half_img);
         acc_map_info_.max_key_ = worldToKey2D(acc_map_info_.origin_ + half_img);
@@ -98,8 +98,8 @@ void AccMap::update(Clock now) {
 
     applyMorphology(map2d);
 
-    cv::imshow("mask", map2d * 255);
-    cv::waitKey(1);
+    // cv::imshow("mask", map2d * 255);
+    // cv::waitKey(1);
 
     curr_ = other;
 }

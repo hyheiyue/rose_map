@@ -21,6 +21,7 @@ RoseMap::RoseMap(rclcpp::Node& node): tf_buffer_(node.get_clock()), ESDF(node) {
         node.create_publisher<sensor_msgs::msg::PointCloud2>("acc_map_out", rclcpp::QoS(10));
     esdf_map_pub_ =
         node.create_publisher<sensor_msgs::msg::PointCloud2>("esdf_out", rclcpp::QoS(10));
+    grid_map_pub_ = node.create_publisher<nav_msgs::msg::OccupancyGrid>("acc_grid", 10);
 }
 void RoseMap::pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
     // 计算相对 ROS 起始时间
@@ -75,7 +76,7 @@ void RoseMap::pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr 
         update(current_time_);
         last_map_update_tp = now_sys;
 
-        if (publisherSubscribed(occ_map_pub_)) {
+        if (publisherSubscribed<sensor_msgs::msg::PointCloud2>(occ_map_pub_)) {
             sensor_msgs::msg::PointCloud2 occ_msg;
             occ_msg.header.stamp = msg->header.stamp;
             occ_msg.header.frame_id = target_frame_;
@@ -83,7 +84,7 @@ void RoseMap::pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr 
             pubPointcloud(cloud, occ_msg, occ_map_pub_);
         }
 
-        if (publisherSubscribed(acc_map_pub_)) {
+        if (publisherSubscribed<sensor_msgs::msg::PointCloud2>(acc_map_pub_)) {
             sensor_msgs::msg::PointCloud2 acc_msg;
             acc_msg.header.stamp = msg->header.stamp;
             acc_msg.header.frame_id = target_frame_;
@@ -91,12 +92,42 @@ void RoseMap::pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr 
             pubPointcloud(cloud, acc_msg, acc_map_pub_);
         }
 
-        if (publisherSubscribed(esdf_map_pub_)) {
+        if (publisherSubscribed<sensor_msgs::msg::PointCloud2>(esdf_map_pub_)) {
             sensor_msgs::msg::PointCloud2 esdf_msg;
             esdf_msg.header.stamp = msg->header.stamp;
             esdf_msg.header.frame_id = target_frame_;
             auto cloud = ESDF::getOccupiedPoints();
             pubPointcloud(cloud, esdf_msg, esdf_map_pub_);
+        }
+        if (publisherSubscribed<nav_msgs::msg::OccupancyGrid>(grid_map_pub_)) {
+            const auto& grid = AccMap::acc_grid_view(); // cv::Mat (uint8 0/1)
+
+            if (!grid.empty()) {
+                nav_msgs::msg::OccupancyGrid msg;
+                msg.header.stamp = node_->now();
+                msg.header.frame_id = target_frame_;
+                msg.info.width = acc_map_info_.nx_;
+                msg.info.height = acc_map_info_.ny_;
+                msg.info.resolution = acc_map_info_.voxel_size_;
+
+                msg.info.origin.position.x =
+                    acc_map_info_.origin_.x() - acc_map_info_.size_.x() / 2.0;
+                msg.info.origin.position.y =
+                    acc_map_info_.origin_.y() - acc_map_info_.size_.y() / 2.0;
+                msg.info.origin.orientation.w = 1.0;
+
+                const int size2d = acc_map_info_.nx_ * acc_map_info_.ny_;
+                msg.data.assign(size2d, 0);
+                std::vector<uint8_t> acc(size2d);
+                std::memcpy(acc.data(), grid.data, size2d);
+
+                for (int i = 0; i < size2d; ++i) {
+                    bool is_occ = (acc[i] == 1);
+                    msg.data[i] = is_occ ? 100 : 0;
+                }
+
+                grid_map_pub_->publish(msg);
+            }
         }
     }
     const auto t1 = std::chrono::steady_clock::now();
@@ -127,7 +158,7 @@ void RoseMap::pubPointcloud(
     sensor_msgs::msg::PointCloud2& msg,
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher
 ) {
-    if (!publisherSubscribed(publisher)) {
+    if (!publisherSubscribed<sensor_msgs::msg::PointCloud2>(publisher)) {
         return;
     }
     msg.height = 1;

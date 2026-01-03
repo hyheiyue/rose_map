@@ -1,6 +1,7 @@
 #pragma once
 #include "esdf.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
+#include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/node.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
@@ -45,9 +46,8 @@ public:
             tf.transform.translation.z
         );
     }
-
-    bool publisherSubscribed(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher
-    ) {
+    template<typename T>
+    bool publisherSubscribed(rclcpp::Publisher<T>::SharedPtr publisher) {
         return publisher->get_subscription_count() > 0;
     }
     void pubPointcloud(
@@ -67,6 +67,7 @@ public:
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr occ_map_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr acc_map_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr esdf_map_pub_;
+    rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr grid_map_pub_;
     Clock current_time_ = 0.0;
     tf2_ros::Buffer tf_buffer_;
     tf2_ros::TransformListener tf_listener_ { tf_buffer_ };

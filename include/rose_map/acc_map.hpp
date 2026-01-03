@@ -15,6 +15,9 @@ struct VoxelKey2D {
 
     VoxelKey2D() = default;
     VoxelKey2D(int x_, int y_): x(x_), y(y_) {}
+    bool operator==(const VoxelKey2D& rhs) const {
+        return x == rhs.x && y == rhs.y;
+    }
 };
 
 class AccMap: public OccMap {

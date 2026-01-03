@@ -19,6 +19,9 @@ struct VoxelKey3D {
     int x, y, z;
     VoxelKey3D(): x(0), y(0), z(0) {}
     VoxelKey3D(int x_, int y_, int z_): x(x_), y(y_), z(z_) {}
+    bool operator==(const VoxelKey3D& rhs) const {
+        return x == rhs.x && y == rhs.y && z == rhs.z;
+    }
 };
 
 /**
