@@ -138,85 +138,94 @@ public:
         size_t max_range_vox,
         tbb::enumerable_thread_specific<std::vector<int>>& tls_free
     ) {
-        tbb::parallel_for(size_t(0), h_list.size(), size_t(32), [&](size_t i) {
-            auto& out = tls_free.local();
+        constexpr size_t GRAIN = 32;
+        tbb::parallel_for(
+            tbb::blocked_range<size_t>(0, h_list.size(),GRAIN),
+            [&](const tbb::blocked_range<size_t>& r) {
+                for (size_t i = r.begin(); i != r.end(); ++i) {
+                    auto& out = tls_free.local();
 
-            const int tx = h_list[i].x;
-            const int ty = h_list[i].y;
-            const int tz = h_list[i].z;
+                    const int tx = h_list[i].x;
+                    const int ty = h_list[i].y;
+                    const int tz = h_list[i].z;
 
-            const float px = o.x + 0.5f;
-            const float py = o.y + 0.5f;
-            const float pz = o.z + 0.5f;
-            const float tpx = tx + 0.5f;
-            const float tpy = ty + 0.5f;
-            const float tpz = tz + 0.5f;
+                    const float px = o.x + 0.5f;
+                    const float py = o.y + 0.5f;
+                    const float pz = o.z + 0.5f;
+                    const float tpx = tx + 0.5f;
+                    const float tpy = ty + 0.5f;
+                    const float tpz = tz + 0.5f;
 
-            float dx = tpx - px;
-            float dy = tpy - py;
-            float dz = tpz - pz;
-            const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
-            if (len < 1e-6f)
-                return;
-            const float invLen = 1.0f / len;
-            dx *= invLen;
-            dy *= invLen;
-            dz *= invLen;
+                    float dx = tpx - px;
+                    float dy = tpy - py;
+                    float dz = tpz - pz;
+                    const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    if (len < 1e-6f)
+                        return;
+                    const float invLen = 1.0f / len;
+                    dx *= invLen;
+                    dy *= invLen;
+                    dz *= invLen;
 
-            int cx = o.x, cy = o.y, cz = o.z;
+                    int cx = o.x, cy = o.y, cz = o.z;
 
-            const int stepX = (dx > 0.f) - (dx < 0.f);
-            const int stepY = (dy > 0.f) - (dy < 0.f);
-            const int stepZ = (dz > 0.f) - (dz < 0.f);
+                    const int stepX = (dx > 0.f) - (dx < 0.f);
+                    const int stepY = (dy > 0.f) - (dy < 0.f);
+                    const int stepZ = (dz > 0.f) - (dz < 0.f);
 
-            const float tDeltaX = (std::abs(dx) > 1e-6f) ? std::abs(1.0f / dx)
+                    const float tDeltaX = (std::abs(dx) > 1e-6f)
+                        ? std::abs(1.0f / dx)
+                        : std::numeric_limits<float>::infinity();
+                    const float tDeltaY = (std::abs(dy) > 1e-6f)
+                        ? std::abs(1.0f / dy)
+                        : std::numeric_limits<float>::infinity();
+                    const float tDeltaZ = (std::abs(dz) > 1e-6f)
+                        ? std::abs(1.0f / dz)
+                        : std::numeric_limits<float>::infinity();
+
+                    float tMaxX = (std::abs(dx) > 1e-6f) ? ((stepX > 0 ? cx + 1.f : cx) - px) / dx
                                                          : std::numeric_limits<float>::infinity();
-            const float tDeltaY = (std::abs(dy) > 1e-6f) ? std::abs(1.0f / dy)
+                    float tMaxY = (std::abs(dy) > 1e-6f) ? ((stepY > 0 ? cy + 1.f : cy) - py) / dy
                                                          : std::numeric_limits<float>::infinity();
-            const float tDeltaZ = (std::abs(dz) > 1e-6f) ? std::abs(1.0f / dz)
+                    float tMaxZ = (std::abs(dz) > 1e-6f) ? ((stepZ > 0 ? cz + 1.f : cz) - pz) / dz
                                                          : std::numeric_limits<float>::infinity();
 
-            float tMaxX = (std::abs(dx) > 1e-6f) ? ((stepX > 0 ? cx + 1.f : cx) - px) / dx
-                                                 : std::numeric_limits<float>::infinity();
-            float tMaxY = (std::abs(dy) > 1e-6f) ? ((stepY > 0 ? cy + 1.f : cy) - py) / dy
-                                                 : std::numeric_limits<float>::infinity();
-            float tMaxZ = (std::abs(dz) > 1e-6f) ? ((stepZ > 0 ? cz + 1.f : cz) - pz) / dz
-                                                 : std::numeric_limits<float>::infinity();
+                    size_t maxStep = max_steps[i];
+                    if (maxStep > max_range_vox)
+                        maxStep = max_range_vox;
 
-            size_t maxStep = max_steps[i];
-            if (maxStep > max_range_vox)
-                maxStep = max_range_vox;
+                    size_t stepCount = 0;
 
-            size_t stepCount = 0;
+                    while (stepCount < maxStep) {
+                        if (cx == tx && cy == ty && cz == tz)
+                            break;
+                        if (tMaxX < tMaxY) {
+                            if (tMaxX < tMaxZ) {
+                                cx += stepX;
+                                tMaxX += tDeltaX;
+                            } else {
+                                cz += stepZ;
+                                tMaxZ += tDeltaZ;
+                            }
+                        } else {
+                            if (tMaxY < tMaxZ) {
+                                cy += stepY;
+                                tMaxY += tDeltaY;
+                            } else {
+                                cz += stepZ;
+                                tMaxZ += tDeltaZ;
+                            }
+                        }
 
-            while (stepCount < maxStep) {
-                if (cx == tx && cy == ty && cz == tz)
-                    break;
-                if (tMaxX < tMaxY) {
-                    if (tMaxX < tMaxZ) {
-                        cx += stepX;
-                        tMaxX += tDeltaX;
-                    } else {
-                        cz += stepZ;
-                        tMaxZ += tDeltaZ;
-                    }
-                } else {
-                    if (tMaxY < tMaxZ) {
-                        cy += stepY;
-                        tMaxY += tDeltaY;
-                    } else {
-                        cz += stepZ;
-                        tMaxZ += tDeltaZ;
+                        const int idx = key3DToIndex3D({ cx, cy, cz });
+                        if (idx < 0)
+                            break;
+                        out.push_back(idx);
+                        ++stepCount;
                     }
                 }
-
-                const int idx = key3DToIndex3D({ cx, cy, cz });
-                if (idx < 0)
-                    break;
-                out.push_back(idx);
-                ++stepCount;
             }
-        });
+        );
     }
 
     inline int key3DToIndex3D(const VoxelKey3D& k) const {
