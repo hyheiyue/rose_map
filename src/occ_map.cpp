@@ -53,6 +53,7 @@ void OccMap::insertPointCloud(
 
     struct LocalBuf {
         std::vector<int> ray;
+        std::vector<VoxelKey3D> outmap_ray;
         std::vector<int> hit;
     };
 
@@ -64,16 +65,13 @@ void OccMap::insertPointCloud(
             auto& local = tls.local();
             local.hit.reserve(256);
             local.ray.reserve(256);
+            local.outmap_ray.reserve(256);
 
             for (size_t i = r.begin(); i < r.end(); ++i) {
                 const auto& p = pts[i];
-                if ((p - sensor_origin).squaredNorm() > max_r2)
-                    continue;
 
                 VoxelKey3D k_hit = worldToKey3D(p);
                 int hit_idx = key3DToIndex3D(k_hit);
-                if (hit_idx < 0)
-                    continue;
 
                 for (auto& n: HIT_D) {
                     int idx = key3DToIndex3D({ k_hit.x + n[0], k_hit.y + n[1], k_hit.z + n[2] });
@@ -87,13 +85,22 @@ void OccMap::insertPointCloud(
                             key3DToIndex3D({ k_hit.x + n[0], k_hit.y + n[1], k_hit.z + n[2] });
                         if (idx >= 0) {
                             local.ray.push_back(idx);
+                        } else {
+                            local.outmap_ray.push_back(
+                                { k_hit.x + n[0], k_hit.y + n[1], k_hit.z + n[2] }
+                            );
                         }
                     }
                 }
             }
         }
     );
+    std::vector<int> clamped_outmap;
+    std::vector<VoxelKey3D> outmap_ray;
     for (auto& local: tls) {
+        for (const VoxelKey3D& k: local.outmap_ray) {
+            outmap_ray.push_back(k);
+        }
         if (params_.occ_map_params.use_ray) {
             for (int idx: local.ray)
                 ray_buf_.tryPush(idx, stamp_now_);
@@ -101,6 +108,10 @@ void OccMap::insertPointCloud(
         for (int idx: local.hit)
             hit_buf_.tryPush(idx, stamp_now_);
     }
+    clamped_outmap = raycastClipToMapParallel(sensor_key, outmap_ray);
+
+    for (int idx: clamped_outmap)
+        ray_buf_.tryPush(idx, stamp_now_);
 
     if (params_.occ_map_params.use_ray) {
         std::vector<VoxelKey3D> h_list;

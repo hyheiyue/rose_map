@@ -22,14 +22,23 @@ RoseMap::RoseMap(rclcpp::Node& node): tf_buffer_(node.get_clock()), ESDF(node) {
     esdf_map_pub_ =
         node.create_publisher<sensor_msgs::msg::PointCloud2>("esdf_out", rclcpp::QoS(10));
     grid_map_pub_ = node.create_publisher<nav_msgs::msg::OccupancyGrid>("acc_grid", 10);
+    update_thread = std::thread(&RoseMap::updateThread, this);
 }
+RoseMap::~RoseMap() {
+    run_flag_ = false;
+    if (update_thread.joinable()) {
+        update_thread.join();
+    }
+}
+
 void RoseMap::pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
     // 计算相对 ROS 起始时间
     const double ros_time = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
     static double t_init = -1.0;
     if (t_init < 0.0)
         t_init = ros_time;
-    current_time_ = static_cast<Clock>(ros_time - t_init);
+    last_header_ = msg->header;
+    double frame_time = static_cast<Clock>(ros_time - t_init);
     Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
     try {
         auto tf =
@@ -41,11 +50,9 @@ void RoseMap::pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr 
     const size_t size = msg->width * msg->height;
     std::vector<Eigen::Vector3f> pts;
     pts.reserve(size);
-
     sensor_msgs::PointCloud2ConstIterator<float> iter_x(*msg, "x");
     sensor_msgs::PointCloud2ConstIterator<float> iter_y(*msg, "y");
     sensor_msgs::PointCloud2ConstIterator<float> iter_z(*msg, "z");
-
     for (size_t i = 0; i < size; ++i) {
         Eigen::Vector4f p(*iter_x, *iter_y, *iter_z, 1.0f);
         p = T * p;
@@ -56,9 +63,9 @@ void RoseMap::pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr 
         ++iter_y;
         ++iter_z;
     }
-
-    const auto t0 = std::chrono::steady_clock::now();
-
+    Frame frame;
+    frame.time = frame_time;
+    frame.pts = std::move(pts);
     Eigen::Vector3f sensor_origin;
     try {
         sensor_origin = lookupTF(target_frame_, sensor_frame_, msg->header.stamp);
@@ -66,9 +73,22 @@ void RoseMap::pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr 
         RCLCPP_WARN(node_->get_logger(), "[OccMap] TF lookup failed (%s)", sensor_frame_.c_str());
         sensor_origin = origin();
     }
-    insertPointCloud(pts, sensor_origin, current_time_);
+    frame.sensor_origin = sensor_origin;
+    frames_.push_back(std::move(frame));
+}
+void RoseMap::updateThread() {
+    while (rclcpp::ok() && run_flag_) {
+        if (!frames_.empty()) {
+            handleUpdate(frames_.front());
+            frames_.pop_front();
+        }
+    }
+}
+void RoseMap::handleUpdate(const Frame& frame) {
+    current_time_ = frame.time;
+    const auto t0 = std::chrono::steady_clock::now();
+    insertPointCloud(frame.pts, frame.sensor_origin, current_time_);
 
-    // 地图更新与发布逻辑
     static auto last_map_update_tp = std::chrono::steady_clock::now();
     const auto now_sys = std::chrono::steady_clock::now();
 
@@ -78,7 +98,7 @@ void RoseMap::pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr 
 
         if (publisherSubscribed<sensor_msgs::msg::PointCloud2>(occ_map_pub_)) {
             sensor_msgs::msg::PointCloud2 occ_msg;
-            occ_msg.header.stamp = msg->header.stamp;
+            occ_msg.header.stamp = last_header_.stamp;
             occ_msg.header.frame_id = target_frame_;
             auto cloud = OccMap::getOccupiedPoints();
             pubPointcloud(cloud, occ_msg, occ_map_pub_);
@@ -86,7 +106,7 @@ void RoseMap::pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr 
 
         if (publisherSubscribed<sensor_msgs::msg::PointCloud2>(acc_map_pub_)) {
             sensor_msgs::msg::PointCloud2 acc_msg;
-            acc_msg.header.stamp = msg->header.stamp;
+            acc_msg.header.stamp = last_header_.stamp;
             acc_msg.header.frame_id = target_frame_;
             auto cloud = AccMap::getOccupiedPoints();
             pubPointcloud(cloud, acc_msg, acc_map_pub_);
@@ -94,7 +114,7 @@ void RoseMap::pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr 
 
         if (publisherSubscribed<sensor_msgs::msg::PointCloud2>(esdf_map_pub_)) {
             sensor_msgs::msg::PointCloud2 esdf_msg;
-            esdf_msg.header.stamp = msg->header.stamp;
+            esdf_msg.header.stamp = last_header_.stamp;
             esdf_msg.header.frame_id = target_frame_;
             auto cloud = ESDF::getOccupiedPoints();
             pubPointcloud(cloud, esdf_msg, esdf_map_pub_);
@@ -153,6 +173,7 @@ void RoseMap::pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr 
         last_report_tp_ = now_sys;
     }
 }
+
 void RoseMap::pubPointcloud(
     const std::vector<Eigen::Vector4f> all,
     sensor_msgs::msg::PointCloud2& msg,

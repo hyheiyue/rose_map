@@ -29,11 +29,49 @@ public:
     static Ptr create(rclcpp::Node& node) {
         return std::make_shared<AccMap>(node);
     }
+    void updateRoboBase() {
+        Eigen::Vector3f robo_base = occ_map_info_.origin_;
+        const VoxelKey3D o = worldToKey3D(robo_base);
+        const float voxel_size = occ_map_info_.voxel_size_;
+        const int search_range = static_cast<int>(0.5f / voxel_size); // ±0.5m
+
+        float min_z = std::numeric_limits<float>::max();
+        bool found = false;
+        const float base_z_world = occ_map_info_.origin_.z();
+        for (int i = -search_range; i <= search_range; ++i) {
+            const int x = o.x + i;
+            for (int j = -search_range; j <= search_range; ++j) {
+                const int y = o.y + j;
+                for (int k = -search_range; k < 0; ++k) {
+                    const int z = o.z + k;
+
+                    VoxelKey3D ky { x, y, z };
+                    const int idx = key3DToIndex3D(ky);
+                    if (idx < 0)
+                        continue;
+
+                    if (!isOccupied(idx, now_))
+                        continue;
+
+                    const float pz = base_z_world + k * voxel_size;
+                    if (pz < min_z) {
+                        min_z = pz;
+                        found = true;
+                    }
+                }
+            }
+        }
+        if (found) {
+            robo_base.z() = min_z;
+        } else {
+            robo_base.z() -= params_.acc_map_params.origin2base;
+        }
+
+        robo_base_ = robo_base;
+    }
 
     Eigen::Vector3f getRoboBase() const {
-        // Robot base position in world frame
-        return occ_map_info_.origin_
-            - Eigen::Vector3f(0.0f, 0.0f, params_.acc_map_params.origin2base);
+        return robo_base_;
     }
     void setOrigin(const Eigen::Vector3f& o) {
         OccMap::setOrigin(o);
@@ -173,7 +211,7 @@ public:
     cv::Mat buf0_;
     cv::Mat buf1_;
     cv::Mat* curr_ { nullptr };
-
+    Eigen::Vector3f robo_base_;
     std::vector<uint8_t> image_mask_; // 0 blocked, 1 free
     bool has_image_map_ = false;
 

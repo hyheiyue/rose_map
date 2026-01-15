@@ -13,9 +13,15 @@ class RoseMap: public ESDF {
 public:
     using Ptr = std::shared_ptr<RoseMap>;
     RoseMap(rclcpp::Node& node);
+    ~RoseMap();
     static Ptr create(rclcpp::Node& node) {
         return std::make_shared<RoseMap>(node);
     }
+    struct Frame {
+        double time;
+        std::vector<Eigen::Vector3f> pts;
+        Eigen::Vector3f sensor_origin;
+    };
     void pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
     Eigen::Matrix4f tf2ToEigen(const geometry_msgs::msg::TransformStamped& tf) {
         Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
@@ -55,12 +61,18 @@ public:
         sensor_msgs::msg::PointCloud2& msg,
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher
     );
+    void handleUpdate(const Frame& frame);
+    void updateThread();
+    bool run_flag_ = true;
+    std::thread update_thread;
+    std::deque<Frame> frames_;
     double callback_cost_accum_ms_ = 0.0;
     size_t callback_count_ = 0;
     double max_update_dt_ = 0.1;
     bool log_time_ = false;
     std::string sensor_frame_;
     std::chrono::steady_clock::time_point last_report_tp_;
+    std_msgs::msg::Header last_header_;
     rclcpp::Node* node_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_sub_;
     std::string target_frame_;

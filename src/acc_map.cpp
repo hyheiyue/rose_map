@@ -44,6 +44,7 @@ AccMap::AccMap(rclcpp::Node& node): OccMap(node) {
 
 void AccMap::update(Clock now) {
     OccMap::update(now);
+    updateRoboBase();
     if (!has_image_map_) {
         VoxelKey2D new_origin = worldToKey2D(acc_map_info_.tmp_origin_);
         acc_map_info_.origin_ = acc_map_info_.tmp_origin_;
@@ -173,8 +174,7 @@ std::vector<Eigen::Vector4f> AccMap::getOccupiedPoints() const {
     }
 
     Eigen::Vector3f robo_base = getRoboBase();
-    pts.emplace_back(robo_base.x(), robo_base.y(), robo_base.z(), 0.0f);
-
+    pts.emplace_back(robo_base.x(), robo_base.y(), robo_base.z(), 1.0f);
     return pts;
 }
 

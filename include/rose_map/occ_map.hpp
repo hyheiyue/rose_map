@@ -131,6 +131,104 @@ public:
 
     void commitFree(Clock t);
 
+    inline std::vector<int>
+    raycastClipToMapParallel(const VoxelKey3D& o, const std::vector<VoxelKey3D>& outmap_list) {
+        std::vector<int> clamped_indices(outmap_list.size(), -1);
+
+        const size_t MAX_STEP = occ_map_info_.nx_ + occ_map_info_.ny_ + occ_map_info_.nz_;
+
+        constexpr size_t GRAIN = 32;
+
+        tbb::parallel_for(
+            tbb::blocked_range<size_t>(0, outmap_list.size(), GRAIN),
+            [&](const tbb::blocked_range<size_t>& r) {
+                for (size_t i = r.begin(); i != r.end(); ++i) {
+                    const auto& h = outmap_list[i];
+
+                    // --- 体素中心 ---
+                    const float px = o.x + 0.5f;
+                    const float py = o.y + 0.5f;
+                    const float pz = o.z + 0.5f;
+                    const float tpx = h.x + 0.5f;
+                    const float tpy = h.y + 0.5f;
+                    const float tpz = h.z + 0.5f;
+
+                    float dx = tpx - px;
+                    float dy = tpy - py;
+                    float dz = tpz - pz;
+
+                    const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    if (len < 1e-6f)
+                        continue;
+
+                    const float invLen = 1.0f / len;
+                    dx *= invLen;
+                    dy *= invLen;
+                    dz *= invLen;
+
+                    int cx = o.x, cy = o.y, cz = o.z;
+
+                    const int stepX = (dx > 0.f) - (dx < 0.f);
+                    const int stepY = (dy > 0.f) - (dy < 0.f);
+                    const int stepZ = (dz > 0.f) - (dz < 0.f);
+
+                    const float tDeltaX = (std::abs(dx) > 1e-6f)
+                        ? std::abs(1.0f / dx)
+                        : std::numeric_limits<float>::infinity();
+                    const float tDeltaY = (std::abs(dy) > 1e-6f)
+                        ? std::abs(1.0f / dy)
+                        : std::numeric_limits<float>::infinity();
+                    const float tDeltaZ = (std::abs(dz) > 1e-6f)
+                        ? std::abs(1.0f / dz)
+                        : std::numeric_limits<float>::infinity();
+
+                    float tMaxX = (std::abs(dx) > 1e-6f) ? ((stepX > 0 ? cx + 1.f : cx) - px) / dx
+                                                         : std::numeric_limits<float>::infinity();
+                    float tMaxY = (std::abs(dy) > 1e-6f) ? ((stepY > 0 ? cy + 1.f : cy) - py) / dy
+                                                         : std::numeric_limits<float>::infinity();
+                    float tMaxZ = (std::abs(dz) > 1e-6f) ? ((stepZ > 0 ? cz + 1.f : cz) - pz) / dz
+                                                         : std::numeric_limits<float>::infinity();
+
+                    const size_t maxStep = std::min(static_cast<size_t>(std::ceil(len)), MAX_STEP);
+
+                    size_t stepCount = 0;
+                    int last_valid_idx = -1;
+
+                    while (stepCount < maxStep) {
+                        if (tMaxX < tMaxY) {
+                            if (tMaxX < tMaxZ) {
+                                cx += stepX;
+                                tMaxX += tDeltaX;
+                            } else {
+                                cz += stepZ;
+                                tMaxZ += tDeltaZ;
+                            }
+                        } else {
+                            if (tMaxY < tMaxZ) {
+                                cy += stepY;
+                                tMaxY += tDeltaY;
+                            } else {
+                                cz += stepZ;
+                                tMaxZ += tDeltaZ;
+                            }
+                        }
+
+                        const int idx = key3DToIndex3D({ cx, cy, cz });
+                        if (idx < 0)
+                            break;
+
+                        last_valid_idx = idx;
+                        ++stepCount;
+                    }
+
+                    clamped_indices[i] = last_valid_idx;
+                }
+            }
+        );
+
+        return clamped_indices;
+    }
+
     inline void raycastFreeKeyTLS_SyncStep_Parallel(
         const VoxelKey3D& o,
         const std::vector<VoxelKey3D>& h_list,
@@ -140,7 +238,7 @@ public:
     ) {
         constexpr size_t GRAIN = 32;
         tbb::parallel_for(
-            tbb::blocked_range<size_t>(0, h_list.size(),GRAIN),
+            tbb::blocked_range<size_t>(0, h_list.size(), GRAIN),
             [&](const tbb::blocked_range<size_t>& r) {
                 for (size_t i = r.begin(); i != r.end(); ++i) {
                     auto& out = tls_free.local();
