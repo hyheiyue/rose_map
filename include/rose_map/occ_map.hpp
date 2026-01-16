@@ -38,6 +38,13 @@ struct StampedIndexBuffer {
         }
         count[idx]++;
     }
+    inline void tryPush(int idx, int count_val, uint32_t now) {
+        if (stamp[idx] != now) {
+            stamp[idx] = now;
+            indices.push_back(idx);
+        }
+        count[idx] += count_val;
+    }
     inline void resize(size_t n) {
         stamp.resize(n, 0);
         count.resize(n, 0);
@@ -131,8 +138,11 @@ public:
 
     void commitFree(Clock t);
 
-    inline std::vector<int>
-    raycastClipToMapParallel(const VoxelKey3D& o, const std::vector<VoxelKey3D>& outmap_list) {
+    inline std::vector<int> raycastClipToMapParallel(
+        const VoxelKey3D& o,
+        const std::vector<VoxelKey3D>& outmap_list,
+        size_t max_range_vox
+    ) {
         std::vector<int> clamped_indices(outmap_list.size(), -1);
 
         const size_t MAX_STEP = occ_map_info_.nx_ + occ_map_info_.ny_ + occ_map_info_.nz_;
@@ -145,7 +155,6 @@ public:
                 for (size_t i = r.begin(); i != r.end(); ++i) {
                     const auto& h = outmap_list[i];
 
-                    // --- 体素中心 ---
                     const float px = o.x + 0.5f;
                     const float py = o.y + 0.5f;
                     const float pz = o.z + 0.5f;
@@ -189,8 +198,9 @@ public:
                     float tMaxZ = (std::abs(dz) > 1e-6f) ? ((stepZ > 0 ? cz + 1.f : cz) - pz) / dz
                                                          : std::numeric_limits<float>::infinity();
 
-                    const size_t maxStep = std::min(static_cast<size_t>(std::ceil(len)), MAX_STEP);
-
+                    size_t maxStep = std::min(static_cast<size_t>(std::ceil(len)), MAX_STEP);
+                    if (maxStep > max_range_vox)
+                        maxStep = max_range_vox;
                     size_t stepCount = 0;
                     int last_valid_idx = -1;
 
@@ -228,13 +238,19 @@ public:
 
         return clamped_indices;
     }
-
+    struct RayResult {
+        int free;
+        int count;
+        RayResult(): free(0), count(0) {}
+        RayResult(int free_, int count_): free(free_), count(count_) {}
+    };
     inline void raycastFreeKeyTLS_SyncStep_Parallel(
         const VoxelKey3D& o,
         const std::vector<VoxelKey3D>& h_list,
         const std::vector<size_t>& max_steps,
+        const std::vector<int>& count,
         size_t max_range_vox,
-        tbb::enumerable_thread_specific<std::vector<int>>& tls_free
+        tbb::enumerable_thread_specific<std::vector<RayResult>>& tls_free
     ) {
         constexpr size_t GRAIN = 32;
         tbb::parallel_for(
@@ -246,7 +262,7 @@ public:
                     const int tx = h_list[i].x;
                     const int ty = h_list[i].y;
                     const int tz = h_list[i].z;
-
+                    const int count_val = count[i];
                     const float px = o.x + 0.5f;
                     const float py = o.y + 0.5f;
                     const float pz = o.z + 0.5f;
@@ -318,7 +334,8 @@ public:
                         const int idx = key3DToIndex3D({ cx, cy, cz });
                         if (idx < 0)
                             break;
-                        out.push_back(idx);
+                        out.push_back({ idx, count_val });
+
                         ++stepCount;
                     }
                 }

@@ -98,46 +98,49 @@ void OccMap::insertPointCloud(
     std::vector<int> clamped_outmap;
     std::vector<VoxelKey3D> outmap_ray;
     for (auto& local: tls) {
-        for (const VoxelKey3D& k: local.outmap_ray) {
-            outmap_ray.push_back(k);
-        }
         if (params_.occ_map_params.use_ray) {
+            for (const VoxelKey3D& k: local.outmap_ray) {
+                outmap_ray.push_back(k);
+            }
             for (int idx: local.ray)
                 ray_buf_.tryPush(idx, stamp_now_);
         }
         for (int idx: local.hit)
             hit_buf_.tryPush(idx, stamp_now_);
     }
-    clamped_outmap = raycastClipToMapParallel(sensor_key, outmap_ray);
-
-    for (int idx: clamped_outmap)
-        ray_buf_.tryPush(idx, stamp_now_);
 
     if (params_.occ_map_params.use_ray) {
         std::vector<VoxelKey3D> h_list;
         std::vector<size_t> step_limit;
+        std::vector<int> count;
         size_t max_range_vox =
             std::ceil(params_.occ_map_params.max_ray_range / occ_map_info_.voxel_size_);
+        clamped_outmap = raycastClipToMapParallel(sensor_key, outmap_ray, max_range_vox);
 
+        for (int idx: clamped_outmap)
+            ray_buf_.tryPush(idx, stamp_now_);
         for (int idx: ray_buf_.indices) {
             auto k = index3DToKey3D(idx);
             h_list.push_back(k);
+            count.push_back(1);
             step_limit.push_back(
                 std::abs(k.x - sensor_key.x) + std::abs(k.y - sensor_key.y)
                 + std::abs(k.z - sensor_key.z)
             );
         }
-        tbb::enumerable_thread_specific<std::vector<int>> tls_free;
+
+        tbb::enumerable_thread_specific<std::vector<RayResult>> tls_free;
         raycastFreeKeyTLS_SyncStep_Parallel(
             sensor_key,
             h_list,
             step_limit,
+            count,
             max_range_vox,
             tls_free
         );
         for (auto& local: tls_free) {
-            for (int idx: local) {
-                free_buf_.tryPush(idx, stamp_now_);
+            for (const auto& r: local) {
+                free_buf_.tryPush(r.free, r.count, stamp_now_);
             }
         }
 
