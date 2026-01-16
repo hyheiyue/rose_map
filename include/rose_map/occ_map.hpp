@@ -24,9 +24,6 @@ struct VoxelKey3D {
     }
 };
 
-/**
- * @brief 每帧唯一索引收集器（buffer + stamp 封装）
- */
 struct StampedIndexBuffer {
     std::vector<int> indices;
     std::vector<uint32_t> stamp;
@@ -45,6 +42,9 @@ struct StampedIndexBuffer {
         }
         count[idx] += count_val;
     }
+    inline void reserve(size_t n) {
+        indices.reserve(n);
+    }
     inline void resize(size_t n) {
         stamp.resize(n, 0);
         count.resize(n, 0);
@@ -60,9 +60,9 @@ struct StampedIndexBuffer {
     }
     inline void clear() {
         indices.clear();
+        std::fill(count.begin(), count.end(), 0);
     }
 };
-
 class OccMap {
 public:
     using Ptr = std::shared_ptr<OccMap>;
@@ -80,16 +80,6 @@ public:
             log_odds = 0.f;
             last_update = 0.0;
         }
-    };
-    const std::vector<Eigen::Vector3i> HIT_D = {
-        { 0, 0, 0 },
-        //  { -1, 0, 0 },
-        //  { 1, 0, 0 },
-        //  { 0, -1, 0 },
-        //  { 0, 1, 0 }
-    };
-    const std::vector<Eigen::Vector3i> RAY_D = {
-        { 0, 0, 0 },
     };
     static constexpr int FREE_D[1][3] = { { 0, 0, 0 } };
     void insertPointCloud(
@@ -137,212 +127,138 @@ public:
     void commitHits(Clock t);
 
     void commitFree(Clock t);
+    struct RayResultSOA {
+        std::vector<int> free_idx;
+        std::vector<int> count;
 
-    inline std::vector<int> raycastClipToMapParallel(
-        const VoxelKey3D& o,
-        const std::vector<VoxelKey3D>& outmap_list,
-        size_t max_range_vox
-    ) {
-        std::vector<int> clamped_indices(outmap_list.size(), -1);
+        inline void reserve(size_t n) {
+            free_idx.reserve(n);
+            count.reserve(n);
+        }
 
-        const size_t MAX_STEP = occ_map_info_.nx_ + occ_map_info_.ny_ + occ_map_info_.nz_;
+        inline void clear() {
+            free_idx.clear();
+            count.clear();
+        }
 
-        constexpr size_t GRAIN = 32;
+        inline void push(int idx, int c) {
+            free_idx.push_back(idx);
+            count.push_back(c);
+        }
 
-        tbb::parallel_for(
-            tbb::blocked_range<size_t>(0, outmap_list.size(), GRAIN),
-            [&](const tbb::blocked_range<size_t>& r) {
-                for (size_t i = r.begin(); i != r.end(); ++i) {
-                    const auto& h = outmap_list[i];
-
-                    const float px = o.x + 0.5f;
-                    const float py = o.y + 0.5f;
-                    const float pz = o.z + 0.5f;
-                    const float tpx = h.x + 0.5f;
-                    const float tpy = h.y + 0.5f;
-                    const float tpz = h.z + 0.5f;
-
-                    float dx = tpx - px;
-                    float dy = tpy - py;
-                    float dz = tpz - pz;
-
-                    const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
-                    if (len < 1e-6f)
-                        continue;
-
-                    const float invLen = 1.0f / len;
-                    dx *= invLen;
-                    dy *= invLen;
-                    dz *= invLen;
-
-                    int cx = o.x, cy = o.y, cz = o.z;
-
-                    const int stepX = (dx > 0.f) - (dx < 0.f);
-                    const int stepY = (dy > 0.f) - (dy < 0.f);
-                    const int stepZ = (dz > 0.f) - (dz < 0.f);
-
-                    const float tDeltaX = (std::abs(dx) > 1e-6f)
-                        ? std::abs(1.0f / dx)
-                        : std::numeric_limits<float>::infinity();
-                    const float tDeltaY = (std::abs(dy) > 1e-6f)
-                        ? std::abs(1.0f / dy)
-                        : std::numeric_limits<float>::infinity();
-                    const float tDeltaZ = (std::abs(dz) > 1e-6f)
-                        ? std::abs(1.0f / dz)
-                        : std::numeric_limits<float>::infinity();
-
-                    float tMaxX = (std::abs(dx) > 1e-6f) ? ((stepX > 0 ? cx + 1.f : cx) - px) / dx
-                                                         : std::numeric_limits<float>::infinity();
-                    float tMaxY = (std::abs(dy) > 1e-6f) ? ((stepY > 0 ? cy + 1.f : cy) - py) / dy
-                                                         : std::numeric_limits<float>::infinity();
-                    float tMaxZ = (std::abs(dz) > 1e-6f) ? ((stepZ > 0 ? cz + 1.f : cz) - pz) / dz
-                                                         : std::numeric_limits<float>::infinity();
-
-                    size_t maxStep = std::min(static_cast<size_t>(std::ceil(len)), MAX_STEP);
-                    if (maxStep > max_range_vox)
-                        maxStep = max_range_vox;
-                    size_t stepCount = 0;
-                    int last_valid_idx = -1;
-
-                    while (stepCount < maxStep) {
-                        if (tMaxX < tMaxY) {
-                            if (tMaxX < tMaxZ) {
-                                cx += stepX;
-                                tMaxX += tDeltaX;
-                            } else {
-                                cz += stepZ;
-                                tMaxZ += tDeltaZ;
-                            }
-                        } else {
-                            if (tMaxY < tMaxZ) {
-                                cy += stepY;
-                                tMaxY += tDeltaY;
-                            } else {
-                                cz += stepZ;
-                                tMaxZ += tDeltaZ;
-                            }
-                        }
-
-                        const int idx = key3DToIndex3D({ cx, cy, cz });
-                        if (idx < 0)
-                            break;
-
-                        last_valid_idx = idx;
-                        ++stepCount;
-                    }
-
-                    clamped_indices[i] = last_valid_idx;
-                }
-            }
-        );
-
-        return clamped_indices;
-    }
-    struct RayResult {
-        int free;
-        int count;
-        RayResult(): free(0), count(0) {}
-        RayResult(int free_, int count_): free(free_), count(count_) {}
+        inline size_t size() const {
+            return free_idx.size();
+        }
     };
-    inline void raycastFreeKeyTLS_SyncStep_Parallel(
+
+    struct DDAOutmapPolicy {
+        inline bool shouldStop(int cx, int cy, int cz) const {
+            return false; // 只由 map boundary 控制
+        }
+
+        inline void emit(int idx, RayResultSOA& out) const {
+            out.push(idx, 1);
+        }
+    };
+
+    struct DDARayPolicy {
+        int tx, ty, tz;
+        int count;
+
+        inline bool shouldStop(int cx, int cy, int cz) const {
+            return (cx == tx && cy == ty && cz == tz);
+        }
+
+        inline void emit(int idx, RayResultSOA& out) const {
+            out.push(idx, count);
+        }
+    };
+    template<typename Policy>
+    inline void ddaRaycastKernel(
         const VoxelKey3D& o,
-        const std::vector<VoxelKey3D>& h_list,
-        const std::vector<size_t>& max_steps,
-        const std::vector<int>& count,
+        float dx,
+        float dy,
+        float dz,
         size_t max_range_vox,
-        tbb::enumerable_thread_specific<std::vector<RayResult>>& tls_free
+        const Policy& policy,
+        RayResultSOA& out
     ) {
-        constexpr size_t GRAIN = 32;
-        tbb::parallel_for(
-            tbb::blocked_range<size_t>(0, h_list.size(), GRAIN),
-            [&](const tbb::blocked_range<size_t>& r) {
-                for (size_t i = r.begin(); i != r.end(); ++i) {
-                    auto& out = tls_free.local();
+        const int min_x = occ_map_info_.min_key_.x;
+        const int min_y = occ_map_info_.min_key_.y;
+        const int min_z = occ_map_info_.min_key_.z;
+        const int max_x = occ_map_info_.max_key_.x;
+        const int max_y = occ_map_info_.max_key_.y;
+        const int max_z = occ_map_info_.max_key_.z;
 
-                    const int tx = h_list[i].x;
-                    const int ty = h_list[i].y;
-                    const int tz = h_list[i].z;
-                    const int count_val = count[i];
-                    const float px = o.x + 0.5f;
-                    const float py = o.y + 0.5f;
-                    const float pz = o.z + 0.5f;
-                    const float tpx = tx + 0.5f;
-                    const float tpy = ty + 0.5f;
-                    const float tpz = tz + 0.5f;
+        const float px = o.x + 0.5f;
+        const float py = o.y + 0.5f;
+        const float pz = o.z + 0.5f;
 
-                    float dx = tpx - px;
-                    float dy = tpy - py;
-                    float dz = tpz - pz;
-                    const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
-                    if (len < 1e-6f)
-                        return;
-                    const float invLen = 1.0f / len;
-                    dx *= invLen;
-                    dy *= invLen;
-                    dz *= invLen;
+        int cx = o.x;
+        int cy = o.y;
+        int cz = o.z;
 
-                    int cx = o.x, cy = o.y, cz = o.z;
+        const int stepX = (dx > 0.f) - (dx < 0.f);
+        const int stepY = (dy > 0.f) - (dy < 0.f);
+        const int stepZ = (dz > 0.f) - (dz < 0.f);
 
-                    const int stepX = (dx > 0.f) - (dx < 0.f);
-                    const int stepY = (dy > 0.f) - (dy < 0.f);
-                    const int stepZ = (dz > 0.f) - (dz < 0.f);
+        const float tDeltaX =
+            (std::abs(dx) > 1e-6f) ? std::abs(1.f / dx) : std::numeric_limits<float>::infinity();
+        const float tDeltaY =
+            (std::abs(dy) > 1e-6f) ? std::abs(1.f / dy) : std::numeric_limits<float>::infinity();
+        const float tDeltaZ =
+            (std::abs(dz) > 1e-6f) ? std::abs(1.f / dz) : std::numeric_limits<float>::infinity();
 
-                    const float tDeltaX = (std::abs(dx) > 1e-6f)
-                        ? std::abs(1.0f / dx)
-                        : std::numeric_limits<float>::infinity();
-                    const float tDeltaY = (std::abs(dy) > 1e-6f)
-                        ? std::abs(1.0f / dy)
-                        : std::numeric_limits<float>::infinity();
-                    const float tDeltaZ = (std::abs(dz) > 1e-6f)
-                        ? std::abs(1.0f / dz)
-                        : std::numeric_limits<float>::infinity();
+        float tMaxX = (std::abs(dx) > 1e-6f) ? ((stepX > 0 ? cx + 1.f : cx) - px) / dx
+                                             : std::numeric_limits<float>::infinity();
+        float tMaxY = (std::abs(dy) > 1e-6f) ? ((stepY > 0 ? cy + 1.f : cy) - py) / dy
+                                             : std::numeric_limits<float>::infinity();
+        float tMaxZ = (std::abs(dz) > 1e-6f) ? ((stepZ > 0 ? cz + 1.f : cz) - pz) / dz
+                                             : std::numeric_limits<float>::infinity();
 
-                    float tMaxX = (std::abs(dx) > 1e-6f) ? ((stepX > 0 ? cx + 1.f : cx) - px) / dx
-                                                         : std::numeric_limits<float>::infinity();
-                    float tMaxY = (std::abs(dy) > 1e-6f) ? ((stepY > 0 ? cy + 1.f : cy) - py) / dy
-                                                         : std::numeric_limits<float>::infinity();
-                    float tMaxZ = (std::abs(dz) > 1e-6f) ? ((stepZ > 0 ? cz + 1.f : cz) - pz) / dz
-                                                         : std::numeric_limits<float>::infinity();
-
-                    size_t maxStep = max_steps[i];
-                    if (maxStep > max_range_vox)
-                        maxStep = max_range_vox;
-
-                    size_t stepCount = 0;
-
-                    while (stepCount < maxStep) {
-                        if (cx == tx && cy == ty && cz == tz)
-                            break;
-                        if (tMaxX < tMaxY) {
-                            if (tMaxX < tMaxZ) {
-                                cx += stepX;
-                                tMaxX += tDeltaX;
-                            } else {
-                                cz += stepZ;
-                                tMaxZ += tDeltaZ;
-                            }
-                        } else {
-                            if (tMaxY < tMaxZ) {
-                                cy += stepY;
-                                tMaxY += tDeltaY;
-                            } else {
-                                cz += stepZ;
-                                tMaxZ += tDeltaZ;
-                            }
-                        }
-
-                        const int idx = key3DToIndex3D({ cx, cy, cz });
-                        if (idx < 0)
-                            break;
-                        out.push_back({ idx, count_val });
-
-                        ++stepCount;
-                    }
+        for (size_t step = 0; step < max_range_vox; ++step) {
+            if (tMaxX < tMaxY) {
+                if (tMaxX < tMaxZ) {
+                    cx += stepX;
+                    tMaxX += tDeltaX;
+                } else {
+                    cz += stepZ;
+                    tMaxZ += tDeltaZ;
+                }
+            } else {
+                if (tMaxY < tMaxZ) {
+                    cy += stepY;
+                    tMaxY += tDeltaY;
+                } else {
+                    cz += stepZ;
+                    tMaxZ += tDeltaZ;
                 }
             }
-        );
-    }
 
+            if (cx < min_x || cx > max_x || cy < min_y || cy > max_y || cz < min_z || cz > max_z)
+                break;
+
+            if (policy.shouldStop(cx, cy, cz))
+                break;
+
+            const int idx = key3DToIndex3D({ cx, cy, cz });
+            if (idx >= 0)
+                policy.emit(idx, out);
+        }
+    }
+    inline void raycastOutmapParallel(
+        const VoxelKey3D& o,
+        const std::vector<VoxelKey3D>& outmap_targets,
+        size_t max_range_vox,
+        tbb::enumerable_thread_specific<RayResultSOA>& tls_free
+    );
+
+    inline void raycastParallel(
+        const VoxelKey3D& o,
+        const StampedIndexBuffer& ray,
+        size_t max_range_vox,
+        tbb::enumerable_thread_specific<RayResultSOA>& tls_free
+    );
     inline int key3DToIndex3D(const VoxelKey3D& k) const {
         const int ox = occ_map_info_.origin_key_.x;
         const int oy = occ_map_info_.origin_key_.y;
@@ -417,35 +333,6 @@ public:
                  occ_map_info_.origin_key_.y + dy - half_y,
                  occ_map_info_.origin_key_.z + dz - half_z };
     }
-    // inline int key3DToIndex3D(const VoxelKey3D& k) const {
-    //     int dx = k.x - origin_key_.x + nx_ / 2;
-    //     int dy = k.y - origin_key_.y + ny_ / 2;
-    //     int dz = k.z - origin_key_.z + nz_ / 2;
-
-    //     if ((unsigned)dx >= (unsigned)nx_ || (unsigned)dy >= (unsigned)ny_
-    //         || (unsigned)dz >= (unsigned)nz_)
-    //         return -1;
-
-    //     int rx = (dx + ox_) % nx_;
-    //     int ry = (dy + oy_) % ny_;
-    //     int rz = (dz + oz_) % nz_;
-
-    //     return (rx * ny_ + ry) * nz_ + rz;
-    // }
-
-    // inline VoxelKey3D index3DToKey3D(int idx) const {
-    //     int rz = idx % nz_;
-    //     int ry = (idx / nz_) % ny_;
-    //     int rx = idx / (ny_ * nz_);
-
-    //     int dx = (rx - ox_ + nx_) % nx_;
-    //     int dy = (ry - oy_ + ny_) % ny_;
-    //     int dz = (rz - oz_ + nz_) % nz_;
-
-    //     return { origin_key_.x + dx - nx_ / 2,
-    //              origin_key_.y + dy - ny_ / 2,
-    //              origin_key_.z + dz - nz_ / 2 };
-    // }
 
     inline VoxelKey3D worldToKey3D(const Eigen::Vector3f& p) const {
         Eigen::Vector3f q = p / occ_map_info_.voxel_size_;
@@ -473,7 +360,6 @@ public:
     StampedIndexBuffer fall_buf_; // occupied → free/unknown
     std::vector<int8_t> prev_occupied_; // 记录上一帧是否 occupied
     uint32_t stamp_now_ = 1;
-
     Clock now_;
 
     Parameters params_;

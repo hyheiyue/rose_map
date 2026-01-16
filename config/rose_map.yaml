@@ -4,34 +4,34 @@ rose_map_node:
     rose_map:
       log_time: true
       pointcloud_topic: /cloud_registered
-      target_frame: odom
+      target_frame: map
       sensor_frame: front_mid360
       max_update_rate: 10
       occ_map:
         origin: [0.0, 0.0, 0.0]
         size: [17.0, 17.0, 1.0]
-        voxel_size: 0.02
+        voxel_size: 0.03
         log_hit: 0.85
         log_free: -0.3
         log_min: -5.0
         log_max: 10.0
         occ_th: 0.0       
-        min_shift: 2
-        timeout: 1.5
+        min_shift: 1
+        timeout: 150.5
         unknown_is_occupied: false
         use_ray: true
         max_ray_range: 20.0
       acc_map:
         origin: [0.0, 0.0]
-        size: [12.0, 12.0]
+        size: [17.0, 17.0]
         voxel_size: 0.05
         origin2base: 0.2
-        min_diff_z: 0.15
+        min_diff_z: 0.05
         min_block_count: 2
         block_ratio: 0.15
         kernel_size: 3
         dilate_iter: 1
         use_static_map: true
-        static_map_path: "/home/hy/wust_nav2/src/bringup_nav/map/simulation/rmul_2026.yaml"
+        static_map_path: ""
       esdf:
         use_diagonals: true

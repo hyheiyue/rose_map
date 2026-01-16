@@ -119,37 +119,90 @@ void AccMap::applyMorphology(cv::Mat& img) {
 }
 
 bool AccMap::loadRosMapYaml(const std::string& yaml_path) {
-    YAML::Node yaml = YAML::LoadFile(yaml_path);
-    std::string image_path = yaml["image"].as<std::string>();
-    float resolution = yaml["resolution"].as<float>();
+    YAML::Node yaml;
 
-    auto origin = yaml["origin"];
-    Eigen::Vector2f origin_xy(origin[0].as<float>(), origin[1].as<float>());
+    try {
+        yaml = YAML::LoadFile(yaml_path);
+    } catch (const std::exception& e) {
+        std::cerr << "[AccMap] Failed to load yaml: " << yaml_path << " , reason: " << e.what()
+                  << std::endl;
+        return false;
+    }
 
-    std::string base_dir = yaml_path.substr(0, yaml_path.find_last_of("/"));
-    if (image_path[0] != '/')
-        image_path = base_dir + "/" + image_path;
+    if (!yaml || !yaml.IsMap()) {
+        std::cerr << "[AccMap] Invalid yaml format: " << yaml_path << std::endl;
+        return false;
+    }
+
+    if (!yaml["image"] || !yaml["resolution"] || !yaml["origin"]) {
+        std::cerr << "[AccMap] Missing required fields in yaml: " << yaml_path << std::endl;
+        return false;
+    }
+
+    std::string image_path;
+    float resolution = 0.f;
+    Eigen::Vector2f origin_xy;
+
+    try {
+        image_path = yaml["image"].as<std::string>();
+        resolution = yaml["resolution"].as<float>();
+
+        const auto& origin = yaml["origin"];
+        if (!origin.IsSequence() || origin.size() < 2) {
+            std::cerr << "[AccMap] Invalid origin field in yaml: " << yaml_path << std::endl;
+            return false;
+        }
+        origin_xy << origin[0].as<float>(), origin[1].as<float>();
+    } catch (const std::exception& e) {
+        std::cerr << "[AccMap] YAML field parse error: " << e.what() << std::endl;
+        return false;
+    }
+
+    if (image_path.empty()) {
+        std::cerr << "[AccMap] Empty image path in yaml: " << yaml_path << std::endl;
+        return false;
+    }
+
+    if (image_path[0] != '/') {
+        const auto pos = yaml_path.find_last_of("/\\");
+        if (pos == std::string::npos) {
+            image_path = image_path;
+        } else {
+            image_path = yaml_path.substr(0, pos + 1) + image_path;
+        }
+    }
 
     cv::Mat img = cv::imread(image_path, cv::IMREAD_GRAYSCALE);
-    if (img.empty())
+    if (img.empty()) {
+        std::cerr << "[AccMap] Failed to load map image: " << image_path << std::endl;
         return false;
+    }
+
+    if (resolution <= 0.f) {
+        std::cerr << "[AccMap] Invalid resolution: " << resolution << std::endl;
+        return false;
+    }
 
     image_width_ = img.cols;
     image_height_ = img.rows;
     image_resolution_ = resolution;
     image_origin_ = origin_xy;
 
-    image_mask_.resize(image_width_ * image_height_);
+    image_mask_.assign(image_width_ * image_height_, 0);
+
+    const bool negate = yaml["negate"].as<int>(0) != 0;
+    const float free_thresh = yaml["free_thresh"].as<float>(0.196f);
+    const float occ_thresh = yaml["occupied_thresh"].as<float>(0.65f);
 
     for (int y = 0; y < image_height_; ++y) {
+        const uint8_t* row_ptr = img.ptr<uint8_t>(y);
         for (int x = 0; x < image_width_; ++x) {
-            uint8_t v = img.at<uint8_t>(y, x);
-            if (yaml["negate"].as<int>(0))
-                v = 255 - v;
+            uint8_t v = row_ptr[x];
+            if (negate)
+                v = static_cast<uint8_t>(255 - v);
 
-            float occ = (255 - v) / 255.0f;
-            bool free = occ <= yaml["free_thresh"].as<float>(0.196f);
-            bool occu = occ >= yaml["occupied_thresh"].as<float>(0.65f);
+            const float occ = (255.f - v) / 255.f;
+            const bool free = occ <= free_thresh;
 
             image_mask_[y * image_width_ + x] = free ? 1 : 0;
         }

@@ -78,20 +78,30 @@ void RoseMap::pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr 
 }
 void RoseMap::updateThread() {
     while (rclcpp::ok() && run_flag_) {
+        if (frames_.empty())
+            continue;
+
+        const double now_time = frames_.back().time;
+        while (!frames_.empty() && now_time - frames_.front().time > 1.0) {
+            frames_.pop_front();
+        }
+
         if (!frames_.empty()) {
             handleUpdate(frames_.front());
             frames_.pop_front();
         }
     }
 }
+
 void RoseMap::handleUpdate(const Frame& frame) {
     current_time_ = frame.time;
     const auto t0 = std::chrono::steady_clock::now();
     insertPointCloud(frame.pts, frame.sensor_origin, current_time_);
 
     static auto last_map_update_tp = std::chrono::steady_clock::now();
+    static int processed_points = 0;
     const auto now_sys = std::chrono::steady_clock::now();
-
+    processed_points += frame.pts.size();
     if (std::chrono::duration<double>(now_sys - last_map_update_tp).count() >= max_update_dt_) {
         update(current_time_);
         last_map_update_tp = now_sys;
@@ -163,13 +173,15 @@ void RoseMap::handleUpdate(const Frame& frame) {
     if (std::chrono::duration<double>(now_sys - last_report_tp_).count() >= 1.0 && log_time_) {
         RCLCPP_INFO(
             node_->get_logger(),
-            "[RoseMap] %.2f ms/s, avg %.3f ms (%zu calls)",
+            "[RoseMap] %.2f ms/s, avg %.3f ms (%zu calls), processed %d points",
             callback_cost_accum_ms_,
             callback_cost_accum_ms_ / std::max<size_t>(1, callback_count_),
-            callback_count_
+            callback_count_,
+            processed_points
         );
         callback_cost_accum_ms_ = 0.0;
         callback_count_ = 0;
+        processed_points = 0;
         last_report_tp_ = now_sys;
     }
 }

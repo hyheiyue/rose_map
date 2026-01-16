@@ -47,107 +47,166 @@ void OccMap::insertPointCloud(
     free_buf_.clear();
     ray_buf_.clear();
 
-    const float max_r2 =
-        params_.occ_map_params.max_ray_range * params_.occ_map_params.max_ray_range;
     const VoxelKey3D sensor_key = worldToKey3D(sensor_origin);
 
     struct LocalBuf {
         std::vector<int> ray;
         std::vector<VoxelKey3D> outmap_ray;
         std::vector<int> hit;
+        bool inited = false;
     };
 
     tbb::enumerable_thread_specific<LocalBuf> tls;
 
     tbb::parallel_for(
-        tbb::blocked_range<size_t>(0, pts.size()),
+        tbb::blocked_range<size_t>(0, pts.size(), 64),
         [&](const tbb::blocked_range<size_t>& r) {
             auto& local = tls.local();
-            local.hit.reserve(256);
-            local.ray.reserve(256);
-            local.outmap_ray.reserve(256);
-
+            if (!local.inited) {
+                local.hit.reserve(512);
+                local.ray.reserve(512);
+                local.outmap_ray.reserve(256);
+                local.inited = true;
+            }
             for (size_t i = r.begin(); i < r.end(); ++i) {
-                const auto& p = pts[i];
+                const Eigen::Vector3f& p = pts[i];
+                const VoxelKey3D k_hit = worldToKey3D(p);
 
-                VoxelKey3D k_hit = worldToKey3D(p);
-                int hit_idx = key3DToIndex3D(k_hit);
+                int idx = key3DToIndex3D(k_hit);
+                if (idx >= 0)
+                    local.hit.push_back(idx);
 
-                for (auto& n: HIT_D) {
-                    int idx = key3DToIndex3D({ k_hit.x + n[0], k_hit.y + n[1], k_hit.z + n[2] });
-                    if (idx >= 0) {
-                        local.hit.push_back(idx);
-                    }
-                }
                 if (params_.occ_map_params.use_ray) {
-                    for (auto n: RAY_D) {
-                        int idx =
-                            key3DToIndex3D({ k_hit.x + n[0], k_hit.y + n[1], k_hit.z + n[2] });
-                        if (idx >= 0) {
-                            local.ray.push_back(idx);
-                        } else {
-                            local.outmap_ray.push_back(
-                                { k_hit.x + n[0], k_hit.y + n[1], k_hit.z + n[2] }
-                            );
-                        }
-                    }
+                    int idx = key3DToIndex3D(k_hit);
+                    if (idx >= 0)
+                        local.ray.push_back(idx);
+                    else
+                        local.outmap_ray.push_back(k_hit);
                 }
             }
         }
     );
-    std::vector<int> clamped_outmap;
+
+    size_t total_hit = 0, total_ray = 0, total_outmap = 0;
+    for (const auto& local: tls) {
+        total_hit += local.hit.size();
+        total_ray += local.ray.size();
+        total_outmap += local.outmap_ray.size();
+    }
+
     std::vector<VoxelKey3D> outmap_ray;
+    outmap_ray.reserve(total_outmap);
+    hit_buf_.reserve(total_hit);
+    ray_buf_.reserve(total_ray);
+
     for (auto& local: tls) {
-        if (params_.occ_map_params.use_ray) {
-            for (const VoxelKey3D& k: local.outmap_ray) {
-                outmap_ray.push_back(k);
-            }
-            for (int idx: local.ray)
-                ray_buf_.tryPush(idx, stamp_now_);
-        }
         for (int idx: local.hit)
             hit_buf_.tryPush(idx, stamp_now_);
+
+        if (params_.occ_map_params.use_ray) {
+            for (int idx: local.ray)
+                ray_buf_.tryPush(idx, stamp_now_);
+
+            outmap_ray.insert(outmap_ray.end(), local.outmap_ray.begin(), local.outmap_ray.end());
+        }
     }
+    commitHits(t);
 
     if (params_.occ_map_params.use_ray) {
-        std::vector<VoxelKey3D> h_list;
-        std::vector<size_t> step_limit;
-        std::vector<int> count;
-        size_t max_range_vox =
-            std::ceil(params_.occ_map_params.max_ray_range / occ_map_info_.voxel_size_);
-        clamped_outmap = raycastClipToMapParallel(sensor_key, outmap_ray, max_range_vox);
-
-        for (int idx: clamped_outmap)
-            ray_buf_.tryPush(idx, stamp_now_);
-        for (int idx: ray_buf_.indices) {
-            auto k = index3DToKey3D(idx);
-            h_list.push_back(k);
-            count.push_back(1);
-            step_limit.push_back(
-                std::abs(k.x - sensor_key.x) + std::abs(k.y - sensor_key.y)
-                + std::abs(k.z - sensor_key.z)
-            );
-        }
-
-        tbb::enumerable_thread_specific<std::vector<RayResult>> tls_free;
-        raycastFreeKeyTLS_SyncStep_Parallel(
-            sensor_key,
-            h_list,
-            step_limit,
-            count,
-            max_range_vox,
-            tls_free
+        const size_t max_range_vox = static_cast<size_t>(
+            std::ceil(params_.occ_map_params.max_ray_range / occ_map_info_.voxel_size_)
         );
+        tbb::enumerable_thread_specific<RayResultSOA> tls_free([&] {
+            RayResultSOA v;
+            v.reserve(256);
+            return v;
+        });
+
+        raycastOutmapParallel(sensor_key, outmap_ray, max_range_vox, tls_free);
         for (auto& local: tls_free) {
-            for (const auto& r: local) {
-                free_buf_.tryPush(r.free, r.count, stamp_now_);
+            for (size_t i = 0; i < local.size(); ++i) {
+                free_buf_.tryPush(local.free_idx[i], local.count[i], stamp_now_);
             }
         }
 
+        tls_free = tbb::enumerable_thread_specific<RayResultSOA>([&] {
+            RayResultSOA v;
+            v.reserve(256);
+            return v;
+        });
+
+        raycastParallel(sensor_key, ray_buf_, max_range_vox, tls_free);
+        for (auto& local: tls_free) {
+            for (size_t i = 0; i < local.size(); ++i) {
+                free_buf_.tryPush(local.free_idx[i], local.count[i], stamp_now_);
+            }
+        }
         ray_buf_.clear();
+        commitFree(t);
     }
-    commitFree(t);
-    commitHits(t);
+}
+inline void OccMap::raycastOutmapParallel(
+    const VoxelKey3D& o,
+    const std::vector<VoxelKey3D>& outmap_targets,
+    size_t max_range_vox,
+    tbb::enumerable_thread_specific<RayResultSOA>& tls_free
+) {
+    constexpr size_t GRAIN = 256;
+
+    tbb::parallel_for(
+        tbb::blocked_range<size_t>(0, outmap_targets.size(), GRAIN),
+        [&](const tbb::blocked_range<size_t>& r) {
+            auto& out = tls_free.local();
+            for (size_t i = r.begin(); i < r.end(); ++i) {
+                const auto& h = outmap_targets[i];
+
+                float dx = (h.x + 0.5f) - (o.x + 0.5f);
+                float dy = (h.y + 0.5f) - (o.y + 0.5f);
+                float dz = (h.z + 0.5f) - (o.z + 0.5f);
+
+                const float invLen = 1.f / std::max({ std::abs(dx), std::abs(dy), std::abs(dz) });
+                dx *= invLen;
+                dy *= invLen;
+                dz *= invLen;
+
+                DDAOutmapPolicy policy;
+                ddaRaycastKernel(o, dx, dy, dz, max_range_vox, policy, out);
+            }
+        }
+    );
+}
+
+inline void OccMap::raycastParallel(
+    const VoxelKey3D& o,
+    const StampedIndexBuffer& ray,
+    size_t max_range_vox,
+    tbb::enumerable_thread_specific<RayResultSOA>& tls_free
+) {
+    constexpr size_t GRAIN = 256;
+
+    tbb::parallel_for(
+        tbb::blocked_range<size_t>(0, ray.indices.size(), GRAIN),
+        [&](const tbb::blocked_range<size_t>& r) {
+            auto& out = tls_free.local();
+
+            for (size_t i = r.begin(); i < r.end(); ++i) {
+                const auto& k = index3DToKey3D(ray.indices[i]);
+
+                float dx = (k.x + 0.5f) - (o.x + 0.5f);
+                float dy = (k.y + 0.5f) - (o.y + 0.5f);
+                float dz = (k.z + 0.5f) - (o.z + 0.5f);
+
+                const float invLen = 1.f / std::max({ std::abs(dx), std::abs(dy), std::abs(dz) });
+                dx *= invLen;
+                dy *= invLen;
+                dz *= invLen;
+
+                DDARayPolicy policy { k.x, k.y, k.z, ray.count[ray.indices[i]] };
+
+                ddaRaycastKernel(o, dx, dy, dz, max_range_vox, policy, out);
+            }
+        }
+    );
 }
 
 void OccMap::update(Clock now) {
