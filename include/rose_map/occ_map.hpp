@@ -108,21 +108,6 @@ public:
     void slideAxis(int axis, int shift);
     void clearSlice(int axis, int slice);
     void resetAll();
-    inline void trackOccupied(bool was, bool now, int idx) {
-        if (!was && now) {
-            occupied_pos_[idx] = occupied_buffer_idx_.size();
-            occupied_buffer_idx_.push_back(idx);
-        } else if (was && !now) {
-            int pos = occupied_pos_[idx];
-            if (pos < 0)
-                return;
-            int last = occupied_buffer_idx_.back();
-            occupied_buffer_idx_[pos] = last;
-            occupied_pos_[last] = pos;
-            occupied_buffer_idx_.pop_back();
-            occupied_pos_[idx] = -1;
-        }
-    }
 
     void commitHits(Clock t);
 
@@ -354,11 +339,7 @@ public:
     } occ_map_info_;
 
     std::vector<int> occupied_buffer_idx_;
-    std::vector<int> occupied_pos_;
     StampedIndexBuffer hit_buf_, free_buf_, ray_buf_;
-    StampedIndexBuffer rise_buf_; // free/unknown → occupied
-    StampedIndexBuffer fall_buf_; // occupied → free/unknown
-    std::vector<int8_t> prev_occupied_; // 记录上一帧是否 occupied
     uint32_t stamp_now_ = 1;
     Clock now_;
 

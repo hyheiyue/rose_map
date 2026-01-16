@@ -61,17 +61,30 @@ public:
         sensor_msgs::msg::PointCloud2& msg,
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher
     );
-    void handleUpdate(const Frame& frame);
+    void handleinsertPointCloud(const Frame& frame);
+    void handleUpdate();
     void updateThread();
+    void insertPointCloudThread();
+    void printStats();
+
+    int insert_count_ = 0;
+    int update_count_ = 0;
+    double insert_cost_ms_ = 0.0;
+    double update_cost_ms_ = 0.0;
+    int processed_pts_ = 0;
+
     bool run_flag_ = true;
     std::thread update_thread;
+    std::thread insert_thread;
     std::deque<Frame> frames_;
+    std::mutex frames_mutex_;
+    std::condition_variable frames_cv_;
+    std::mutex map_mutex_;
     double callback_cost_accum_ms_ = 0.0;
     size_t callback_count_ = 0;
     double max_update_dt_ = 0.1;
     bool log_time_ = false;
     std::string sensor_frame_;
-    std::chrono::steady_clock::time_point last_report_tp_;
     std_msgs::msg::Header last_header_;
     rclcpp::Node* node_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_sub_;

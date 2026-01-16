@@ -2,6 +2,7 @@
 #include <tbb/blocked_range.h>
 #include <tbb/enumerable_thread_specific.h>
 #include <tbb/parallel_for.h>
+#include <tbb/parallel_invoke.h>
 
 namespace rose_map {
 
@@ -26,11 +27,6 @@ OccMap::OccMap(rclcpp::Node& node) {
     hit_buf_.resize(N);
     free_buf_.resize(N);
     ray_buf_.resize(N);
-    rise_buf_.resize(N);
-    fall_buf_.resize(N);
-    prev_occupied_.assign(N, 0);
-
-    occupied_pos_.assign(N, -1);
     occ_map_info_.origin_key_ = worldToKey3D(occ_map_info_.origin_);
     occ_map_info_.ox_ = occ_map_info_.oy_ = occ_map_info_.oz_ = 0;
     occupied_buffer_idx_.reserve(N);
@@ -116,31 +112,35 @@ void OccMap::insertPointCloud(
         const size_t max_range_vox = static_cast<size_t>(
             std::ceil(params_.occ_map_params.max_ray_range / occ_map_info_.voxel_size_)
         );
-        tbb::enumerable_thread_specific<RayResultSOA> tls_free([&] {
+        tbb::enumerable_thread_specific<RayResultSOA> tls_outmap([&] {
             RayResultSOA v;
             v.reserve(256);
             return v;
         });
 
-        raycastOutmapParallel(sensor_key, outmap_ray, max_range_vox, tls_free);
-        for (auto& local: tls_free) {
-            for (size_t i = 0; i < local.size(); ++i) {
-                free_buf_.tryPush(local.free_idx[i], local.count[i], stamp_now_);
-            }
-        }
-
-        tls_free = tbb::enumerable_thread_specific<RayResultSOA>([&] {
+        tbb::enumerable_thread_specific<RayResultSOA> tls_map([&] {
             RayResultSOA v;
             v.reserve(256);
             return v;
         });
 
-        raycastParallel(sensor_key, ray_buf_, max_range_vox, tls_free);
-        for (auto& local: tls_free) {
+        tbb::parallel_invoke(
+            [&] { raycastOutmapParallel(sensor_key, outmap_ray, max_range_vox, tls_outmap); },
+            [&] { raycastParallel(sensor_key, ray_buf_, max_range_vox, tls_map); }
+        );
+
+        for (auto& local: tls_outmap) {
             for (size_t i = 0; i < local.size(); ++i) {
                 free_buf_.tryPush(local.free_idx[i], local.count[i], stamp_now_);
             }
         }
+
+        for (auto& local: tls_map) {
+            for (size_t i = 0; i < local.size(); ++i) {
+                free_buf_.tryPush(local.free_idx[i], local.count[i], stamp_now_);
+            }
+        }
+
         ray_buf_.clear();
         commitFree(t);
     }
@@ -211,32 +211,28 @@ inline void OccMap::raycastParallel(
 
 void OccMap::update(Clock now) {
     now_ = now;
-    rise_buf_.clear();
-    fall_buf_.clear();
 
-    size_t write = 0;
-    for (size_t read = 0; read < occupied_buffer_idx_.size(); ++read) {
-        int idx = occupied_buffer_idx_[read];
-        bool was = prev_occupied_[idx];
-        bool now_occ = isOccupied(idx, now);
+    const int N = occ_map_info_.grid_.size();
 
-        if (!was && now_occ) {
-            rise_buf_.tryPush(idx, stamp_now_);
-        } else if (was && !now_occ) {
-            fall_buf_.tryPush(idx, stamp_now_);
-            occ_map_info_.grid_[idx].reset();
+    occupied_buffer_idx_.clear();
+    occupied_buffer_idx_.reserve(N / 8);
+
+    tbb::enumerable_thread_specific<std::vector<int>> tls([&] {
+        std::vector<int> v;
+        v.reserve(256);
+        return v;
+    });
+    tbb::parallel_for(tbb::blocked_range<int>(0, N, 512), [&](const tbb::blocked_range<int>& r) {
+        auto& local = tls.local();
+        for (int idx = r.begin(); idx != r.end(); ++idx) {
+            if (isOccupied(idx, now)) {
+                local.push_back(idx);
+            }
         }
-
-        if (now_occ) {
-            occupied_buffer_idx_[write++] = idx;
-        } else {
-            occupied_pos_[idx] = -1;
-        }
-
-        prev_occupied_[idx] = now_occ;
+    });
+    for (auto& local: tls) {
+        occupied_buffer_idx_.insert(occupied_buffer_idx_.end(), local.begin(), local.end());
     }
-
-    occupied_buffer_idx_.resize(write);
 }
 
 std::vector<Eigen::Vector4f> OccMap::getOccupiedPoints(float sample_resolution_m) const {
@@ -356,38 +352,95 @@ void OccMap::resetAll() {
     free_buf_.reset();
     ray_buf_.reset();
 }
+struct OccupancyDelta {
+    int idx;
+    bool was;
+    bool now;
+};
 
 void OccMap::commitHits(Clock t) {
-    for (int idx: hit_buf_.indices) {
-        bool was = isOccupied(idx, t);
-        auto& count = hit_buf_.count[idx];
-        Cell& c = occ_map_info_.grid_[idx];
-        c.log_odds = std::min(
-            c.log_odds + params_.occ_map_params.log_hit * count,
-            params_.occ_map_params.log_max
-        );
-        c.last_update = t;
-        count = 0;
-        bool now = isOccupied(idx, t);
-        trackOccupied(was, now, idx);
+    const auto& indices = hit_buf_.indices;
+    if (indices.empty()) {
+        hit_buf_.clear();
+        return;
     }
+
+    tbb::concurrent_vector<OccupancyDelta> deltas;
+
+    tbb::parallel_for(
+        tbb::blocked_range<size_t>(0, indices.size(), 128),
+        [&](const tbb::blocked_range<size_t>& r) {
+            for (size_t i = r.begin(); i != r.end(); ++i) {
+                const int idx = indices[i];
+
+                auto& count = hit_buf_.count[idx];
+                if (count == 0)
+                    continue;
+
+                Cell& c = occ_map_info_.grid_[idx];
+
+                const bool was = isOccupied(idx, t);
+
+                c.log_odds = std::min(
+                    c.log_odds + params_.occ_map_params.log_hit * count,
+                    params_.occ_map_params.log_max
+                );
+                c.last_update = t;
+
+                count = 0;
+
+                const bool now = isOccupied(idx, t);
+
+                if (was != now) {
+                    deltas.push_back({ idx, was, now });
+                }
+            }
+        }
+    );
+
     hit_buf_.clear();
 }
 
 void OccMap::commitFree(Clock t) {
-    for (int idx: free_buf_.indices) {
-        bool was = isOccupied(idx, t);
-        auto& count = free_buf_.count[idx];
-        Cell& c = occ_map_info_.grid_[idx];
-        c.log_odds = std::max(
-            c.log_odds + params_.occ_map_params.log_free * count,
-            params_.occ_map_params.log_min
-        );
-        c.last_update = t;
-        count = 0;
-        bool now = isOccupied(idx, t);
-        trackOccupied(was, now, idx);
+    const auto& indices = free_buf_.indices;
+    if (indices.empty()) {
+        free_buf_.clear();
+        return;
     }
+
+    tbb::concurrent_vector<OccupancyDelta> deltas;
+
+    tbb::parallel_for(
+        tbb::blocked_range<size_t>(0, indices.size(), 128),
+        [&](const tbb::blocked_range<size_t>& r) {
+            for (size_t i = r.begin(); i != r.end(); ++i) {
+                const int idx = indices[i];
+
+                auto& count = free_buf_.count[idx];
+                if (count == 0)
+                    continue;
+
+                Cell& c = occ_map_info_.grid_[idx];
+
+                const bool was = isOccupied(idx, t);
+
+                c.log_odds = std::max(
+                    c.log_odds + params_.occ_map_params.log_free * count,
+                    params_.occ_map_params.log_min
+                );
+                c.last_update = t;
+
+                count = 0;
+
+                const bool now = isOccupied(idx, t);
+
+                if (was != now) {
+                    deltas.push_back({ idx, was, now });
+                }
+            }
+        }
+    );
+
     free_buf_.clear();
 }
 

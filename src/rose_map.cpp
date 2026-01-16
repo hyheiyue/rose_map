@@ -22,6 +22,7 @@ RoseMap::RoseMap(rclcpp::Node& node): tf_buffer_(node.get_clock()), ESDF(node) {
     esdf_map_pub_ =
         node.create_publisher<sensor_msgs::msg::PointCloud2>("esdf_out", rclcpp::QoS(10));
     grid_map_pub_ = node.create_publisher<nav_msgs::msg::OccupancyGrid>("acc_grid", 10);
+    insert_thread = std::thread(&RoseMap::insertPointCloudThread, this);
     update_thread = std::thread(&RoseMap::updateThread, this);
 }
 RoseMap::~RoseMap() {
@@ -45,7 +46,10 @@ void RoseMap::pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr 
             tf_buffer_.lookupTransform(target_frame_, msg->header.frame_id, msg->header.stamp);
         T = tf2ToEigen(tf);
     } catch (...) {
-        RCLCPP_WARN(node_->get_logger(), "[OccMap] TF transform failed → using identity");
+        RCLCPP_WARN(
+            rclcpp::get_logger("rose_map"),
+            "[OccMap] TF transform failed → using identity"
+        );
     }
     const size_t size = msg->width * msg->height;
     std::vector<Eigen::Vector3f> pts;
@@ -70,122 +74,157 @@ void RoseMap::pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr 
     try {
         sensor_origin = lookupTF(target_frame_, sensor_frame_, msg->header.stamp);
     } catch (...) {
-        RCLCPP_WARN(node_->get_logger(), "[OccMap] TF lookup failed (%s)", sensor_frame_.c_str());
+        RCLCPP_WARN(
+            rclcpp::get_logger("rose_map"),
+            "[OccMap] TF lookup failed (%s)",
+            sensor_frame_.c_str()
+        );
         sensor_origin = origin();
     }
     frame.sensor_origin = sensor_origin;
-    frames_.push_back(std::move(frame));
+    {
+        std::lock_guard<std::mutex> lock(frames_mutex_);
+        frames_.push_back(std::move(frame));
+    }
+    frames_cv_.notify_one();
+}
+
+void RoseMap::insertPointCloudThread() {
+    while (rclcpp::ok() && run_flag_) {
+        Frame frame;
+
+        {
+            std::unique_lock<std::mutex> lock(frames_mutex_);
+            frames_cv_.wait(lock, [&] { return !frames_.empty() || !run_flag_; });
+
+            if (!run_flag_)
+                return;
+
+            const double now_time = frames_.back().time;
+            while (!frames_.empty() && now_time - frames_.front().time > 1.0) {
+                frames_.pop_front();
+            }
+
+            if (frames_.empty())
+                continue;
+
+            frame = std::move(frames_.front());
+            frames_.pop_front();
+        }
+
+        handleinsertPointCloud(frame);
+    }
 }
 void RoseMap::updateThread() {
+    auto next_tp = std::chrono::steady_clock::now();
+
     while (rclcpp::ok() && run_flag_) {
-        if (frames_.empty())
-            continue;
-
-        const double now_time = frames_.back().time;
-        while (!frames_.empty() && now_time - frames_.front().time > 1.0) {
-            frames_.pop_front();
-        }
-
-        if (!frames_.empty()) {
-            handleUpdate(frames_.front());
-            frames_.pop_front();
-        }
-    }
-}
-
-void RoseMap::handleUpdate(const Frame& frame) {
-    current_time_ = frame.time;
-    const auto t0 = std::chrono::steady_clock::now();
-    insertPointCloud(frame.pts, frame.sensor_origin, current_time_);
-
-    static auto last_map_update_tp = std::chrono::steady_clock::now();
-    static int processed_points = 0;
-    const auto now_sys = std::chrono::steady_clock::now();
-    processed_points += frame.pts.size();
-    if (std::chrono::duration<double>(now_sys - last_map_update_tp).count() >= max_update_dt_) {
-        update(current_time_);
-        last_map_update_tp = now_sys;
-
-        if (publisherSubscribed<sensor_msgs::msg::PointCloud2>(occ_map_pub_)) {
-            sensor_msgs::msg::PointCloud2 occ_msg;
-            occ_msg.header.stamp = last_header_.stamp;
-            occ_msg.header.frame_id = target_frame_;
-            auto cloud = OccMap::getOccupiedPoints();
-            pubPointcloud(cloud, occ_msg, occ_map_pub_);
-        }
-
-        if (publisherSubscribed<sensor_msgs::msg::PointCloud2>(acc_map_pub_)) {
-            sensor_msgs::msg::PointCloud2 acc_msg;
-            acc_msg.header.stamp = last_header_.stamp;
-            acc_msg.header.frame_id = target_frame_;
-            auto cloud = AccMap::getOccupiedPoints();
-            pubPointcloud(cloud, acc_msg, acc_map_pub_);
-        }
-
-        if (publisherSubscribed<sensor_msgs::msg::PointCloud2>(esdf_map_pub_)) {
-            sensor_msgs::msg::PointCloud2 esdf_msg;
-            esdf_msg.header.stamp = last_header_.stamp;
-            esdf_msg.header.frame_id = target_frame_;
-            auto cloud = ESDF::getOccupiedPoints();
-            pubPointcloud(cloud, esdf_msg, esdf_map_pub_);
-        }
-        if (publisherSubscribed<nav_msgs::msg::OccupancyGrid>(grid_map_pub_)) {
-            const auto& grid = AccMap::acc_grid_view(); // cv::Mat (uint8 0/1)
-
-            if (!grid.empty()) {
-                nav_msgs::msg::OccupancyGrid msg;
-                msg.header.stamp = node_->now();
-                msg.header.frame_id = target_frame_;
-                msg.info.width = acc_map_info_.nx_;
-                msg.info.height = acc_map_info_.ny_;
-                msg.info.resolution = acc_map_info_.voxel_size_;
-
-                msg.info.origin.position.x =
-                    acc_map_info_.origin_.x() - acc_map_info_.size_.x() / 2.0;
-                msg.info.origin.position.y =
-                    acc_map_info_.origin_.y() - acc_map_info_.size_.y() / 2.0;
-                msg.info.origin.orientation.w = 1.0;
-
-                const int size2d = acc_map_info_.nx_ * acc_map_info_.ny_;
-                msg.data.assign(size2d, 0);
-                std::vector<uint8_t> acc(size2d);
-                std::memcpy(acc.data(), grid.data, size2d);
-
-                for (int i = 0; i < size2d; ++i) {
-                    bool is_occ = (acc[i] == 1);
-                    msg.data[i] = is_occ ? 100 : 0;
-                }
-
-                grid_map_pub_->publish(msg);
-            }
-        }
-    }
-    const auto t1 = std::chrono::steady_clock::now();
-    const double cost_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-
-    callback_cost_accum_ms_ += cost_ms;
-    callback_count_++;
-
-    if (last_report_tp_.time_since_epoch().count() == 0) {
-        last_report_tp_ = now_sys;
-    }
-
-    if (std::chrono::duration<double>(now_sys - last_report_tp_).count() >= 1.0 && log_time_) {
-        RCLCPP_INFO(
-            node_->get_logger(),
-            "[RoseMap] %.2f ms/s, avg %.3f ms (%zu calls), processed %d points",
-            callback_cost_accum_ms_,
-            callback_cost_accum_ms_ / std::max<size_t>(1, callback_count_),
-            callback_count_,
-            processed_points
+        next_tp += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(max_update_dt_)
         );
-        callback_cost_accum_ms_ = 0.0;
-        callback_count_ = 0;
-        processed_points = 0;
-        last_report_tp_ = now_sys;
+
+        handleUpdate();
+
+        std::this_thread::sleep_until(next_tp);
     }
 }
 
+void RoseMap::handleUpdate() {
+    update_count_++;
+    auto t0 = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        update(current_time_);
+    }
+    auto t1 = std::chrono::steady_clock::now();
+    update_cost_ms_ += std::chrono::duration<double, std::milli>(t1 - t0).count();
+    printStats();
+    if (publisherSubscribed<sensor_msgs::msg::PointCloud2>(occ_map_pub_)) {
+        sensor_msgs::msg::PointCloud2 occ_msg;
+        occ_msg.header.stamp = last_header_.stamp;
+        occ_msg.header.frame_id = target_frame_;
+        auto cloud = OccMap::getOccupiedPoints();
+        pubPointcloud(cloud, occ_msg, occ_map_pub_);
+    }
+
+    if (publisherSubscribed<sensor_msgs::msg::PointCloud2>(acc_map_pub_)) {
+        sensor_msgs::msg::PointCloud2 acc_msg;
+        acc_msg.header.stamp = last_header_.stamp;
+        acc_msg.header.frame_id = target_frame_;
+        auto cloud = AccMap::getOccupiedPoints();
+        pubPointcloud(cloud, acc_msg, acc_map_pub_);
+    }
+
+    if (publisherSubscribed<sensor_msgs::msg::PointCloud2>(esdf_map_pub_)) {
+        sensor_msgs::msg::PointCloud2 esdf_msg;
+        esdf_msg.header.stamp = last_header_.stamp;
+        esdf_msg.header.frame_id = target_frame_;
+        auto cloud = ESDF::getOccupiedPoints();
+        pubPointcloud(cloud, esdf_msg, esdf_map_pub_);
+    }
+    if (publisherSubscribed<nav_msgs::msg::OccupancyGrid>(grid_map_pub_)) {
+        const auto& grid = AccMap::acc_grid_view(); // cv::Mat (uint8 0/1)
+
+        if (!grid.empty()) {
+            nav_msgs::msg::OccupancyGrid msg;
+            msg.header.stamp = node_->now();
+            msg.header.frame_id = target_frame_;
+            msg.info.width = acc_map_info_.nx_;
+            msg.info.height = acc_map_info_.ny_;
+            msg.info.resolution = acc_map_info_.voxel_size_;
+
+            msg.info.origin.position.x = acc_map_info_.origin_.x() - acc_map_info_.size_.x() / 2.0;
+            msg.info.origin.position.y = acc_map_info_.origin_.y() - acc_map_info_.size_.y() / 2.0;
+            msg.info.origin.orientation.w = 1.0;
+
+            const int size2d = acc_map_info_.nx_ * acc_map_info_.ny_;
+            msg.data.assign(size2d, 0);
+            std::vector<uint8_t> acc(size2d);
+            std::memcpy(acc.data(), grid.data, size2d);
+
+            for (int i = 0; i < size2d; ++i) {
+                bool is_occ = (acc[i] == 1);
+                msg.data[i] = is_occ ? 100 : 0;
+            }
+
+            grid_map_pub_->publish(msg);
+        }
+    }
+}
+void RoseMap::handleinsertPointCloud(const Frame& frame) {
+    insert_count_++;
+    current_time_ = frame.time;
+    auto t0 = std::chrono::high_resolution_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        insertPointCloud(frame.pts, frame.sensor_origin, current_time_);
+    }
+    auto t1 = std::chrono::high_resolution_clock::now();
+    insert_cost_ms_ += std::chrono::duration<double, std::milli>(t1 - t0).count();
+    processed_pts_ += frame.pts.size();
+    printStats();
+}
+void RoseMap::printStats() {
+    static std::chrono::steady_clock::time_point last_report_tp = std::chrono::steady_clock::now();
+    auto now_tp = std::chrono::steady_clock::now();
+    double elapsed_s = std::chrono::duration<double>(now_tp - last_report_tp).count();
+    if (elapsed_s < 1.0)
+        return;
+    last_report_tp = now_tp;
+    RCLCPP_INFO_STREAM(
+        rclcpp::get_logger("rose_map"),
+        "Insert_count: " << insert_count_ << " cost:" << insert_cost_ms_
+                         << " rate:" << insert_count_ / elapsed_s << " Hz"
+                         << " Update_count:: " << update_count_ << " cost:" << update_cost_ms_
+                         << " rate:" << update_count_ / elapsed_s << " Hz"
+                         << " Processed_pts: " << processed_pts_ << " pts/s"
+    );
+    insert_count_ = 0;
+    update_count_ = 0;
+    insert_cost_ms_ = 0.0;
+    update_cost_ms_ = 0.0;
+    processed_pts_ = 0;
+}
 void RoseMap::pubPointcloud(
     const std::vector<Eigen::Vector4f> all,
     sensor_msgs::msg::PointCloud2& msg,
