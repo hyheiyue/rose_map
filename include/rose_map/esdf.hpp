@@ -24,20 +24,6 @@ public:
     std::vector<Eigen::Vector4f> getOccupiedPoints(float sample_resolution_m = 0.1f) const;
 
     static constexpr float kInf = 1e6f;
-
-    struct QNode {
-        VoxelKey2D key;
-        int idx; // cached index for key
-        float dist;
-    };
-
-    // comparator for min-heap (smaller dist -> higher priority)
-    struct QComp {
-        bool operator()(const QNode& a, const QNode& b) const {
-            return a.dist > b.dist;
-        }
-    };
-
     std::vector<float> esdf_;
     std::vector<float> dist_to_occ_;
     std::vector<float> dist_to_free_;
