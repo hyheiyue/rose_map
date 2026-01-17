@@ -1,6 +1,7 @@
 #pragma once
 #include "esdf.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
+#include <deque>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/node.hpp>
@@ -52,10 +53,11 @@ public:
             tf.transform.translation.z
         );
     }
-    template<typename T>
-    bool publisherSubscribed(rclcpp::Publisher<T>::SharedPtr publisher) {
-        return publisher->get_subscription_count() > 0;
+    template<typename PublisherT>
+    bool publisherSubscribed(const PublisherT& publisher) {
+        return publisher && publisher->get_subscription_count() > 0;
     }
+
     void pubPointcloud(
         const std::vector<Eigen::Vector4f> all,
         sensor_msgs::msg::PointCloud2& msg,

@@ -2,70 +2,68 @@
 
 #include "common.hpp"
 #include "parameters.hpp"
-
 #include <Eigen/Core>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <memory>
-#include <queue>
 #include <tbb/enumerable_thread_specific.h>
 #include <tbb/parallel_for.h>
 #include <vector>
 
 namespace rose_map {
 
-struct VoxelKey3D {
-    int x, y, z;
-    VoxelKey3D(): x(0), y(0), z(0) {}
-    VoxelKey3D(int x_, int y_, int z_): x(x_), y(y_), z(z_) {}
-    bool operator==(const VoxelKey3D& rhs) const {
-        return x == rhs.x && y == rhs.y && z == rhs.z;
-    }
-};
-
-struct StampedIndexBuffer {
-    std::vector<int> indices;
-    std::vector<uint32_t> stamp;
-    std::vector<uint16_t> count;
-    inline void tryPush(int idx, uint32_t now) {
-        if (stamp[idx] != now) {
-            stamp[idx] = now;
-            indices.push_back(idx);
-        }
-        count[idx]++;
-    }
-    inline void tryPush(int idx, int count_val, uint32_t now) {
-        if (stamp[idx] != now) {
-            stamp[idx] = now;
-            indices.push_back(idx);
-        }
-        count[idx] += count_val;
-    }
-    inline void reserve(size_t n) {
-        indices.reserve(n);
-    }
-    inline void resize(size_t n) {
-        stamp.resize(n, 0);
-        count.resize(n, 0);
-    }
-    inline void clearOne(int idx) {
-        stamp[idx] = 0;
-        count[idx] = 0;
-    }
-    inline void reset() {
-        indices.clear();
-        std::fill(stamp.begin(), stamp.end(), 0);
-        std::fill(count.begin(), count.end(), 0);
-    }
-    inline void clear() {
-        indices.clear();
-        std::fill(count.begin(), count.end(), 0);
-    }
-};
 class OccMap {
 public:
     using Ptr = std::shared_ptr<OccMap>;
+    struct VoxelKey3D {
+        int x, y, z;
+        VoxelKey3D(): x(0), y(0), z(0) {}
+        VoxelKey3D(int x_, int y_, int z_): x(x_), y(y_), z(z_) {}
+        bool operator==(const VoxelKey3D& rhs) const {
+            return x == rhs.x && y == rhs.y && z == rhs.z;
+        }
+    };
+
+    struct StampedIndexBuffer {
+        std::vector<int> indices;
+        std::vector<uint32_t> stamp;
+        std::vector<uint16_t> count;
+        inline void tryPush(int idx, uint32_t now) {
+            if (stamp[idx] != now) {
+                stamp[idx] = now;
+                indices.push_back(idx);
+            }
+            count[idx]++;
+        }
+        inline void tryPush(int idx, int count_val, uint32_t now) {
+            if (stamp[idx] != now) {
+                stamp[idx] = now;
+                indices.push_back(idx);
+            }
+            count[idx] += count_val;
+        }
+        inline void reserve(size_t n) {
+            indices.reserve(n);
+        }
+        inline void resize(size_t n) {
+            stamp.resize(n, 0);
+            count.resize(n, 0);
+        }
+        inline void clearOne(int idx) {
+            stamp[idx] = 0;
+            count[idx] = 0;
+        }
+        inline void reset() {
+            indices.clear();
+            std::fill(stamp.begin(), stamp.end(), 0);
+            std::fill(count.begin(), count.end(), 0);
+        }
+        inline void clear() {
+            indices.clear();
+            std::fill(count.begin(), count.end(), 0);
+        }
+    };
 
     explicit OccMap(rclcpp::Node& node);
 
@@ -81,7 +79,6 @@ public:
             last_update = 0.0;
         }
     };
-    static constexpr int FREE_D[1][3] = { { 0, 0, 0 } };
     void insertPointCloud(
         const std::vector<Eigen::Vector3f>& pts,
         const Eigen::Vector3f& sensor_origin,

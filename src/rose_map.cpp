@@ -139,7 +139,7 @@ void RoseMap::handleUpdate() {
     auto t1 = std::chrono::steady_clock::now();
     update_cost_ms_ += std::chrono::duration<double, std::milli>(t1 - t0).count();
     printStats();
-    if (publisherSubscribed<sensor_msgs::msg::PointCloud2>(occ_map_pub_)) {
+    if (publisherSubscribed(occ_map_pub_)) {
         sensor_msgs::msg::PointCloud2 occ_msg;
         occ_msg.header.stamp = last_header_.stamp;
         occ_msg.header.frame_id = target_frame_;
@@ -147,7 +147,7 @@ void RoseMap::handleUpdate() {
         pubPointcloud(cloud, occ_msg, occ_map_pub_);
     }
 
-    if (publisherSubscribed<sensor_msgs::msg::PointCloud2>(acc_map_pub_)) {
+    if (publisherSubscribed(acc_map_pub_)) {
         sensor_msgs::msg::PointCloud2 acc_msg;
         acc_msg.header.stamp = last_header_.stamp;
         acc_msg.header.frame_id = target_frame_;
@@ -155,14 +155,14 @@ void RoseMap::handleUpdate() {
         pubPointcloud(cloud, acc_msg, acc_map_pub_);
     }
 
-    if (publisherSubscribed<sensor_msgs::msg::PointCloud2>(esdf_map_pub_)) {
+    if (publisherSubscribed(esdf_map_pub_)) {
         sensor_msgs::msg::PointCloud2 esdf_msg;
         esdf_msg.header.stamp = last_header_.stamp;
         esdf_msg.header.frame_id = target_frame_;
         auto cloud = ESDF::getOccupiedPoints();
         pubPointcloud(cloud, esdf_msg, esdf_map_pub_);
     }
-    if (publisherSubscribed<nav_msgs::msg::OccupancyGrid>(grid_map_pub_)) {
+    if (publisherSubscribed(grid_map_pub_)) {
         const auto& grid = AccMap::acc_grid_view(); // cv::Mat (uint8 0/1)
 
         if (!grid.empty()) {
@@ -230,7 +230,7 @@ void RoseMap::pubPointcloud(
     sensor_msgs::msg::PointCloud2& msg,
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher
 ) {
-    if (!publisherSubscribed<sensor_msgs::msg::PointCloud2>(publisher)) {
+    if (!publisherSubscribed(publisher)) {
         return;
     }
     msg.height = 1;
