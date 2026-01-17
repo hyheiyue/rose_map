@@ -30,14 +30,14 @@ public:
         return std::make_shared<AccMap>(node);
     }
     void updateRoboBase() {
-        Eigen::Vector3f robo_base = occ_map_info_.origin_;
+        Eigen::Vector3f robo_base = occ_map_info_.origin;
         const VoxelKey3D o = worldToKey3D(robo_base);
-        const float voxel_size = occ_map_info_.voxel_size_;
+        const float voxel_size = occ_map_info_.voxel_size;
         const int search_range = static_cast<int>(0.5f / voxel_size); // ±0.5m
 
         float min_z = std::numeric_limits<float>::max();
         bool found = false;
-        const float base_z_world = occ_map_info_.origin_.z();
+        const float base_z_world = occ_map_info_.origin.z();
         for (int i = -search_range; i <= search_range; ++i) {
             const int x = o.x + i;
             for (int j = -search_range; j <= search_range; ++j) {
@@ -75,73 +75,73 @@ public:
     }
     void setOrigin(const Eigen::Vector3f& o) {
         OccMap::setOrigin(o);
-        acc_map_info_.tmp_origin_ = Eigen::Vector2f(o.x(), o.y());
+        acc_map_info_.tmp_origin = Eigen::Vector2f(o.x(), o.y());
     }
     inline int key2DToIndex2D(const VoxelKey2D& k) const {
-        const int ox = acc_map_info_.origin_key_.x;
-        const int oy = acc_map_info_.origin_key_.y;
-        const int half_x = acc_map_info_.nx_ >> 1;
-        const int half_y = acc_map_info_.ny_ >> 1;
+        const int ox = acc_map_info_.origin_key.x;
+        const int oy = acc_map_info_.origin_key.y;
+        const int half_x = acc_map_info_.nx >> 1;
+        const int half_y = acc_map_info_.ny >> 1;
 
         int dx = k.x - ox + half_x;
         int dy = k.y - oy + half_y;
 
-        if (dx < 0 || dx >= acc_map_info_.nx_ || dy < 0 || dy >= acc_map_info_.ny_)
+        if (dx < 0 || dx >= acc_map_info_.nx || dy < 0 || dy >= acc_map_info_.ny)
             return -1;
 
         int rx = dx;
-        if (rx >= acc_map_info_.nx_)
-            rx -= acc_map_info_.nx_;
+        if (rx >= acc_map_info_.nx)
+            rx -= acc_map_info_.nx;
         else if (rx < 0)
-            rx += acc_map_info_.nx_;
+            rx += acc_map_info_.nx;
 
         int ry = dy;
-        if (ry >= acc_map_info_.ny_)
-            ry -= acc_map_info_.ny_;
+        if (ry >= acc_map_info_.ny)
+            ry -= acc_map_info_.ny;
         else if (ry < 0)
-            ry += acc_map_info_.ny_;
+            ry += acc_map_info_.ny;
 
-        return rx + ry * acc_map_info_.nx_;
+        return rx + ry * acc_map_info_.nx;
     }
 
     inline VoxelKey2D index2DToKey2D(int idx) const {
-        const int ox = acc_map_info_.origin_key_.x;
-        const int oy = acc_map_info_.origin_key_.y;
-        const int half_x = acc_map_info_.nx_ >> 1;
-        const int half_y = acc_map_info_.ny_ >> 1;
+        const int ox = acc_map_info_.origin_key.x;
+        const int oy = acc_map_info_.origin_key.y;
+        const int half_x = acc_map_info_.nx >> 1;
+        const int half_y = acc_map_info_.ny >> 1;
 
-        int ry = idx / acc_map_info_.nx_;
-        int rx = idx - ry * acc_map_info_.nx_;
+        int ry = idx / acc_map_info_.nx;
+        int rx = idx - ry * acc_map_info_.nx;
 
         int dx = rx;
         if (dx < 0)
-            dx += acc_map_info_.nx_;
-        else if (dx >= acc_map_info_.nx_)
-            dx -= acc_map_info_.nx_;
+            dx += acc_map_info_.nx;
+        else if (dx >= acc_map_info_.nx)
+            dx -= acc_map_info_.nx;
 
         int dy = ry;
         if (dy < 0)
-            dy += acc_map_info_.ny_;
-        else if (dy >= acc_map_info_.ny_)
-            dy -= acc_map_info_.ny_;
+            dy += acc_map_info_.ny;
+        else if (dy >= acc_map_info_.ny)
+            dy -= acc_map_info_.ny;
 
         return { ox + dx - half_x, oy + dy - half_y };
     }
 
     inline VoxelKey2D worldToKey2D(const Eigen::Vector2f& p) const {
-        Eigen::Vector2f q = p / acc_map_info_.voxel_size_;
+        Eigen::Vector2f q = p / acc_map_info_.voxel_size;
         return { static_cast<int>(std::floor(q.x())), static_cast<int>(std::floor(q.y())) };
     }
 
     inline Eigen::Vector3f key2DToWorld(const VoxelKey2D& k) const {
         Eigen::Vector3f p(static_cast<float>(k.x), static_cast<float>(k.y), 0.0f);
-        p *= acc_map_info_.voxel_size_;
+        p *= acc_map_info_.voxel_size;
         p.z() = getRoboBase().z();
         return p;
     }
 
     inline bool isPassableCached(int idx, const Eigen::Vector3f& robo_base) const {
-        const Cell& c = occ_map_info_.grid_[idx];
+        const Cell& c = occ_map_info_.grid[idx];
         if (!isOccupied(idx, now_))
             return true;
         Eigen::Vector3f p = key3DToWorld(index3DToKey3D(idx));
@@ -159,12 +159,12 @@ public:
         }
 
         // 2. OccMap 外但有静态地图 → 用图像判断
-        if (has_image_map_) {
+        if (static_map_info_.has_static_map) {
             int ix, iy;
             if (worldToImage(world_xy, ix, iy)) {
                 // 在图像范围内 → 直接查 mask
-                if (iy >= 0 && iy < image_height_ && ix >= 0 && ix < image_width_) {
-                    return image_mask_[iy * image_width_ + ix] == 0;
+                if (iy >= 0 && iy < static_map_info_.size.y() && ix >= 0 && ix < static_map_info_.size.x()) {
+                    return static_map_info_.mask[iy * static_map_info_.size.x() + ix] == 0;
                 }
             }
         }
@@ -185,40 +185,42 @@ public:
     void applyMorphology(cv::Mat& src);
     bool loadRosMapYaml(const std::string& yaml_path);
     inline bool worldToImage(const Eigen::Vector2f& pw, int& ix, int& iy) const {
-        Eigen::Vector2f p = pw - image_origin_;
+        Eigen::Vector2f p = pw - static_map_info_.origin;
 
-        ix = static_cast<int>(std::floor(p.x() / image_resolution_));
-        iy = static_cast<int>(std::floor(p.y() / image_resolution_));
+        ix = static_cast<int>(std::floor(p.x() / static_map_info_.resolution));
+        iy = static_cast<int>(std::floor(p.y() / static_map_info_.resolution));
 
         // ROS map: (0,0) 在左下 → OpenCV 在左上
-        iy = image_height_ - 1 - iy;
+        iy = static_map_info_.size.y() - 1 - iy;
 
-        if (ix < 0 || iy < 0 || ix >= image_width_ || iy >= image_height_)
+        if (ix < 0 || iy < 0 || ix >= static_map_info_.size.x() || iy >= static_map_info_.size.y())
             return false;
 
         return true;
     }
     struct AccMapInfo {
-        float voxel_size_;
-        Eigen::Vector2f origin_, size_;
-        Eigen::Vector2f tmp_origin_;
-        int nx_, ny_;
+        float voxel_size;
+        Eigen::Vector2f origin, size;
+        Eigen::Vector2f tmp_origin;
+        int nx, ny;
 
-        VoxelKey2D origin_key_;
-        VoxelKey2D min_key_, max_key_;
+        VoxelKey2D origin_key;
+        VoxelKey2D min_key, max_key;
     } acc_map_info_;
+    struct StaticMapInfo {
+        bool has_static_map = false;
+        float resolution = 0.0f;
+        Eigen::Vector2f origin; // 左下角 (x,y)
+        Eigen::Vector2i size;
+        std::vector<uint8_t> mask; // 0 blocked, 1 free
+    } static_map_info_;
 
     cv::Mat buf0_;
     cv::Mat buf1_;
     cv::Mat* curr_ { nullptr };
     Eigen::Vector3f robo_base_;
-    std::vector<uint8_t> image_mask_; // 0 blocked, 1 free
-    bool has_image_map_ = false;
-
-    float image_resolution_ = 0.0f;
-    Eigen::Vector2f image_origin_; // 左下角 (x,y)
-    int image_width_ = 0;
-    int image_height_ = 0;
+    
+    
 };
 
 } // namespace rose_map

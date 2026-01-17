@@ -169,15 +169,15 @@ void RoseMap::handleUpdate() {
             nav_msgs::msg::OccupancyGrid msg;
             msg.header.stamp = node_->now();
             msg.header.frame_id = target_frame_;
-            msg.info.width = acc_map_info_.nx_;
-            msg.info.height = acc_map_info_.ny_;
-            msg.info.resolution = acc_map_info_.voxel_size_;
+            msg.info.width = acc_map_info_.nx;
+            msg.info.height = acc_map_info_.ny;
+            msg.info.resolution = acc_map_info_.voxel_size;
 
-            msg.info.origin.position.x = acc_map_info_.origin_.x() - acc_map_info_.size_.x() / 2.0;
-            msg.info.origin.position.y = acc_map_info_.origin_.y() - acc_map_info_.size_.y() / 2.0;
+            msg.info.origin.position.x = acc_map_info_.origin.x() - acc_map_info_.size.x() / 2.0;
+            msg.info.origin.position.y = acc_map_info_.origin.y() - acc_map_info_.size.y() / 2.0;
             msg.info.origin.orientation.w = 1.0;
 
-            const int size2d = acc_map_info_.nx_ * acc_map_info_.ny_;
+            const int size2d = acc_map_info_.nx * acc_map_info_.ny;
             msg.data.assign(size2d, 0);
             std::vector<uint8_t> acc(size2d);
             std::memcpy(acc.data(), grid.data, size2d);

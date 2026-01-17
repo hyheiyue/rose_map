@@ -6,12 +6,12 @@
 
 namespace rose_map {
 ESDF::ESDF(rclcpp::Node& node): AccMap(node) {
-    const int size = acc_map_info_.nx_ * acc_map_info_.ny_;
+    const int size = acc_map_info_.nx * acc_map_info_.ny;
     esdf_.resize(size);
     dist_to_occ_.resize(size);
     dist_to_free_.resize(size);
 
-    const float vs = acc_map_info_.voxel_size_;
+    const float vs = acc_map_info_.voxel_size;
     step_cost_[0] = vs; // straight
     step_cost_[1] = vs * std::sqrt(2.0f); // diagonal
 }
@@ -23,17 +23,17 @@ std::vector<Eigen::Vector4f> ESDF::getOccupiedPoints(float sample_resolution_m) 
     std::vector<Eigen::Vector4f> pts;
 
     if (sample_resolution_m <= 0.0f)
-        sample_resolution_m = acc_map_info_.voxel_size_;
+        sample_resolution_m = acc_map_info_.voxel_size;
 
     int stride =
-        std::max(1, static_cast<int>(std::round(sample_resolution_m / acc_map_info_.voxel_size_)));
-    pts.reserve((acc_map_info_.nx_ / stride) * (acc_map_info_.ny_ / stride));
+        std::max(1, static_cast<int>(std::round(sample_resolution_m / acc_map_info_.voxel_size)));
+    pts.reserve((acc_map_info_.nx / stride) * (acc_map_info_.ny / stride));
 
     auto robo = getRoboBase();
 
-    for (int y = 0; y < acc_map_info_.ny_; y += stride) {
-        for (int x = 0; x < acc_map_info_.nx_; x += stride) {
-            int idx = y * acc_map_info_.nx_ + x;
+    for (int y = 0; y < acc_map_info_.ny; y += stride) {
+        for (int x = 0; x < acc_map_info_.nx; x += stride) {
+            int idx = y * acc_map_info_.nx + x;
             VoxelKey2D k = index2DToKey2D(idx);
             Eigen::Vector3f p = key2DToWorld(k);
             pts.emplace_back(p.x(), p.y(), p.z(), esdf_[idx]);
@@ -49,7 +49,7 @@ void ESDF::propagateKeyDistanceFieldTwoPass(
     std::vector<float>& dist,
     bool source_is_occ
 ) {
-    const int size = acc_map_info_.nx_ * acc_map_info_.ny_;
+    const int size = acc_map_info_.nx * acc_map_info_.ny;
     float* dist_ptr = dist.data();
     const uint8_t* acc_ptr = acc.data();
 
@@ -75,9 +75,9 @@ void ESDF::propagateKeyDistanceFieldTwoPass(
     const int iterations = 2;
     for (int it = 0; it < iterations; ++it) {
         // Forward pass（左上 → 右下）
-        for (int y = 0; y < acc_map_info_.ny_; ++y) {
-            for (int x = 0; x < acc_map_info_.nx_; ++x) {
-                int idx = y * acc_map_info_.nx_ + x;
+        for (int y = 0; y < acc_map_info_.ny; ++y) {
+            for (int x = 0; x < acc_map_info_.nx; ++x) {
+                int idx = y * acc_map_info_.nx + x;
                 float cur = dist_ptr[idx];
                 if (!std::isfinite(cur))
                     continue;
@@ -109,9 +109,9 @@ void ESDF::propagateKeyDistanceFieldTwoPass(
         }
 
         // Backward pass（右下 → 左上）
-        for (int y = acc_map_info_.ny_ - 1; y >= 0; --y) {
-            for (int x = acc_map_info_.nx_ - 1; x >= 0; --x) {
-                int idx = y * acc_map_info_.nx_ + x;
+        for (int y = acc_map_info_.ny - 1; y >= 0; --y) {
+            for (int x = acc_map_info_.nx - 1; x >= 0; --x) {
+                int idx = y * acc_map_info_.nx + x;
                 float cur = dist_ptr[idx];
                 if (!std::isfinite(cur))
                     continue; // 跳过 inf/NaN，不参与扩散
@@ -155,7 +155,7 @@ void ESDF::rebuildSigned() {
         [&]() { propagateKeyDistanceFieldTwoPass(acc, dist_to_free_, false); }
     );
 
-    const int size = acc_map_info_.nx_ * acc_map_info_.ny_;
+    const int size = acc_map_info_.nx * acc_map_info_.ny;
     // combine -> esdf (parallel)
     tbb::parallel_for(tbb::blocked_range<int>(0, size), [&](const tbb::blocked_range<int>& r) {
         for (int i = r.begin(); i != r.end(); ++i) {

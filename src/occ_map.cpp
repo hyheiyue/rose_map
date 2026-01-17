@@ -8,27 +8,27 @@ namespace rose_map {
 
 OccMap::OccMap(rclcpp::Node& node) {
     params_.load(node);
-    occ_map_info_.voxel_size_ = params_.occ_map_params.voxel_size;
+    occ_map_info_.voxel_size = params_.occ_map_params.voxel_size;
 
-    occ_map_info_.size_ = params_.occ_map_params.size;
-    occ_map_info_.origin_ = params_.occ_map_params.origin;
+    occ_map_info_.size = params_.occ_map_params.size;
+    occ_map_info_.origin = params_.occ_map_params.origin;
 
-    Eigen::Vector3f half = occ_map_info_.size_ * 0.5f;
-    occ_map_info_.min_key_ = worldToKey3D(occ_map_info_.origin_ - half);
-    occ_map_info_.max_key_ = worldToKey3D(occ_map_info_.origin_ + half);
+    Eigen::Vector3f half = occ_map_info_.size * 0.5f;
+    occ_map_info_.min_key = worldToKey3D(occ_map_info_.origin - half);
+    occ_map_info_.max_key = worldToKey3D(occ_map_info_.origin + half);
 
-    occ_map_info_.nx_ = occ_map_info_.max_key_.x - occ_map_info_.min_key_.x + 1;
-    occ_map_info_.ny_ = occ_map_info_.max_key_.y - occ_map_info_.min_key_.y + 1;
-    occ_map_info_.nz_ = occ_map_info_.max_key_.z - occ_map_info_.min_key_.z + 1;
+    occ_map_info_.nx = occ_map_info_.max_key.x - occ_map_info_.min_key.x + 1;
+    occ_map_info_.ny = occ_map_info_.max_key.y - occ_map_info_.min_key.y + 1;
+    occ_map_info_.nz = occ_map_info_.max_key.z - occ_map_info_.min_key.z + 1;
 
-    const size_t N = static_cast<size_t>(occ_map_info_.nx_) * occ_map_info_.ny_ * occ_map_info_.nz_;
-    occ_map_info_.grid_.resize(N);
+    const size_t N = static_cast<size_t>(occ_map_info_.nx) * occ_map_info_.ny * occ_map_info_.nz;
+    occ_map_info_.grid.resize(N);
 
     hit_buf_.resize(N);
     free_buf_.resize(N);
     ray_buf_.resize(N);
-    occ_map_info_.origin_key_ = worldToKey3D(occ_map_info_.origin_);
-    occ_map_info_.ox_ = occ_map_info_.oy_ = occ_map_info_.oz_ = 0;
+    occ_map_info_.origin_key = worldToKey3D(occ_map_info_.origin);
+    occ_map_info_.ox = occ_map_info_.oy = occ_map_info_.oz = 0;
     occupied_buffer_idx_.reserve(N);
 }
 
@@ -110,7 +110,7 @@ void OccMap::insertPointCloud(
 
     if (params_.occ_map_params.use_ray) {
         const size_t max_range_vox = static_cast<size_t>(
-            std::ceil(params_.occ_map_params.max_ray_range / occ_map_info_.voxel_size_)
+            std::ceil(params_.occ_map_params.max_ray_range / occ_map_info_.voxel_size)
         );
         tbb::enumerable_thread_specific<RayResultSOA> tls_outmap([&] {
             RayResultSOA v;
@@ -212,7 +212,7 @@ inline void OccMap::raycastParallel(
 void OccMap::update(Clock now) {
     now_ = now;
 
-    const int N = occ_map_info_.grid_.size();
+    const int N = occ_map_info_.grid.size();
 
     occupied_buffer_idx_.clear();
     occupied_buffer_idx_.reserve(N / 8);
@@ -239,10 +239,10 @@ std::vector<Eigen::Vector4f> OccMap::getOccupiedPoints(float sample_resolution_m
     std::vector<Eigen::Vector4f> pts;
 
     if (sample_resolution_m <= 0.0f)
-        sample_resolution_m = occ_map_info_.voxel_size_;
+        sample_resolution_m = occ_map_info_.voxel_size;
 
     int stride =
-        std::max(1, static_cast<int>(std::round(sample_resolution_m / occ_map_info_.voxel_size_)));
+        std::max(1, static_cast<int>(std::round(sample_resolution_m / occ_map_info_.voxel_size)));
 
     pts.reserve(occupied_buffer_idx_.size() / stride + 1);
 
@@ -251,7 +251,7 @@ std::vector<Eigen::Vector4f> OccMap::getOccupiedPoints(float sample_resolution_m
         if (!isOccupied(idx, now_))
             continue;
         auto p = key3DToWorld(index3DToKey3D(idx));
-        pts.emplace_back(p.x(), p.y(), p.z(), p.z() - occ_map_info_.origin_.z());
+        pts.emplace_back(p.x(), p.y(), p.z(), p.z() - occ_map_info_.origin.z());
     }
 
     return pts;
@@ -259,39 +259,39 @@ std::vector<Eigen::Vector4f> OccMap::getOccupiedPoints(float sample_resolution_m
 
 void OccMap::setOrigin(const Eigen::Vector3f& o) {
     VoxelKey3D new_origin = worldToKey3D(o);
-    VoxelKey3D shift { new_origin.x - occ_map_info_.origin_key_.x,
-                       new_origin.y - occ_map_info_.origin_key_.y,
-                       new_origin.z - occ_map_info_.origin_key_.z };
+    VoxelKey3D shift { new_origin.x - occ_map_info_.origin_key.x,
+                       new_origin.y - occ_map_info_.origin_key.y,
+                       new_origin.z - occ_map_info_.origin_key.z };
 
     const int min_shift = params_.occ_map_params.min_shift;
     if (std::abs(shift.x) < min_shift && std::abs(shift.y) < min_shift
         && std::abs(shift.z) < min_shift)
         return;
 
-    if (std::abs(shift.x) >= occ_map_info_.nx_ || std::abs(shift.y) >= occ_map_info_.ny_
-        || std::abs(shift.z) >= occ_map_info_.nz_)
+    if (std::abs(shift.x) >= occ_map_info_.nx || std::abs(shift.y) >= occ_map_info_.ny
+        || std::abs(shift.z) >= occ_map_info_.nz)
     {
         resetAll();
-        occ_map_info_.origin_key_ = new_origin;
-        occ_map_info_.origin_ = o;
+        occ_map_info_.origin_key = new_origin;
+        occ_map_info_.origin = o;
         return;
     }
 
     slideAxis(0, shift.x);
     slideAxis(1, shift.y);
     slideAxis(2, shift.z);
-    occ_map_info_.origin_key_ = new_origin;
-    occ_map_info_.origin_ = o;
-    Eigen::Vector3f half = occ_map_info_.size_ * 0.5f;
-    occ_map_info_.min_key_ = worldToKey3D(occ_map_info_.origin_ - half);
-    occ_map_info_.max_key_ = worldToKey3D(occ_map_info_.origin_ + half);
+    occ_map_info_.origin_key = new_origin;
+    occ_map_info_.origin = o;
+    Eigen::Vector3f half = occ_map_info_.size * 0.5f;
+    occ_map_info_.min_key = worldToKey3D(occ_map_info_.origin- half);
+    occ_map_info_.max_key = worldToKey3D(occ_map_info_.origin + half);
 }
 
 void OccMap::slideAxis(int axis, int shift) {
     if (shift == 0)
         return;
-    int dim = (axis == 0 ? occ_map_info_.nx_ : axis == 1 ? occ_map_info_.ny_ : occ_map_info_.nz_);
-    int start = (axis == 0 ? occ_map_info_.ox_ : axis == 1 ? occ_map_info_.oy_ : occ_map_info_.oz_);
+    int dim = (axis == 0 ? occ_map_info_.nx : axis == 1 ? occ_map_info_.ny : occ_map_info_.nz);
+    int start = (axis == 0 ? occ_map_info_.ox : axis == 1 ? occ_map_info_.oy : occ_map_info_.oz);
 
     std::vector<int> slices_to_clear;
     slices_to_clear.reserve(std::abs(shift));
@@ -307,37 +307,37 @@ void OccMap::slideAxis(int axis, int shift) {
         clearSlice(axis, slice);
 
     if (axis == 0)
-        occ_map_info_.ox_ = (occ_map_info_.ox_ + shift + occ_map_info_.nx_) % occ_map_info_.nx_;
+        occ_map_info_.ox = (occ_map_info_.ox + shift + occ_map_info_.nx) % occ_map_info_.nx;
     else if (axis == 1)
-        occ_map_info_.oy_ = (occ_map_info_.oy_ + shift + occ_map_info_.ny_) % occ_map_info_.ny_;
+        occ_map_info_.oy = (occ_map_info_.oy + shift + occ_map_info_.ny) % occ_map_info_.ny;
     else if (axis == 2)
-        occ_map_info_.oz_ = (occ_map_info_.oz_ + shift + occ_map_info_.nz_) % occ_map_info_.nz_;
+        occ_map_info_.oz = (occ_map_info_.oz + shift + occ_map_info_.nz) % occ_map_info_.nz;
 }
 
 void OccMap::clearSlice(int axis, int slice) {
     if (axis == 0) {
-        for (int y = 0; y < occ_map_info_.ny_; ++y)
-            for (int z = 0; z < occ_map_info_.nz_; ++z) {
-                int idx = (slice * occ_map_info_.ny_ + y) * occ_map_info_.nz_ + z;
-                occ_map_info_.grid_[idx].reset();
+        for (int y = 0; y < occ_map_info_.ny; ++y)
+            for (int z = 0; z < occ_map_info_.nz; ++z) {
+                int idx = (slice * occ_map_info_.ny + y) * occ_map_info_.nz + z;
+                occ_map_info_.grid[idx].reset();
                 hit_buf_.clearOne(idx);
                 free_buf_.clearOne(idx);
                 ray_buf_.clearOne(idx);
             }
     } else if (axis == 1) {
-        for (int x = 0; x < occ_map_info_.nx_; ++x)
-            for (int z = 0; z < occ_map_info_.nz_; ++z) {
-                int idx = (x * occ_map_info_.ny_ + slice) * occ_map_info_.nz_ + z;
-                occ_map_info_.grid_[idx].reset();
+        for (int x = 0; x < occ_map_info_.nx; ++x)
+            for (int z = 0; z < occ_map_info_.nz; ++z) {
+                int idx = (x * occ_map_info_.ny + slice) * occ_map_info_.nz + z;
+                occ_map_info_.grid[idx].reset();
                 hit_buf_.clearOne(idx);
                 free_buf_.clearOne(idx);
                 ray_buf_.clearOne(idx);
             }
     } else if (axis == 2) {
-        for (int x = 0; x < occ_map_info_.nx_; ++x)
-            for (int y = 0; y < occ_map_info_.ny_; ++y) {
-                int idx = (x * occ_map_info_.ny_ + y) * occ_map_info_.nz_ + slice;
-                occ_map_info_.grid_[idx].reset();
+        for (int x = 0; x < occ_map_info_.nx; ++x)
+            for (int y = 0; y < occ_map_info_.ny; ++y) {
+                int idx = (x * occ_map_info_.ny + y) * occ_map_info_.nz + slice;
+                occ_map_info_.grid[idx].reset();
                 hit_buf_.clearOne(idx);
                 free_buf_.clearOne(idx);
                 ray_buf_.clearOne(idx);
@@ -346,7 +346,7 @@ void OccMap::clearSlice(int axis, int slice) {
 }
 
 void OccMap::resetAll() {
-    for (auto& c: occ_map_info_.grid_)
+    for (auto& c: occ_map_info_.grid)
         c.reset();
     hit_buf_.reset();
     free_buf_.reset();
@@ -364,9 +364,6 @@ void OccMap::commitHits(Clock t) {
         hit_buf_.clear();
         return;
     }
-
-    tbb::concurrent_vector<OccupancyDelta> deltas;
-
     tbb::parallel_for(
         tbb::blocked_range<size_t>(0, indices.size(), 128),
         [&](const tbb::blocked_range<size_t>& r) {
@@ -377,9 +374,7 @@ void OccMap::commitHits(Clock t) {
                 if (count == 0)
                     continue;
 
-                Cell& c = occ_map_info_.grid_[idx];
-
-                const bool was = isOccupied(idx, t);
+                Cell& c = occ_map_info_.grid[idx];
 
                 c.log_odds = std::min(
                     c.log_odds + params_.occ_map_params.log_hit * count,
@@ -388,12 +383,6 @@ void OccMap::commitHits(Clock t) {
                 c.last_update = t;
 
                 count = 0;
-
-                const bool now = isOccupied(idx, t);
-
-                if (was != now) {
-                    deltas.push_back({ idx, was, now });
-                }
             }
         }
     );
@@ -408,8 +397,6 @@ void OccMap::commitFree(Clock t) {
         return;
     }
 
-    tbb::concurrent_vector<OccupancyDelta> deltas;
-
     tbb::parallel_for(
         tbb::blocked_range<size_t>(0, indices.size(), 128),
         [&](const tbb::blocked_range<size_t>& r) {
@@ -420,9 +407,7 @@ void OccMap::commitFree(Clock t) {
                 if (count == 0)
                     continue;
 
-                Cell& c = occ_map_info_.grid_[idx];
-
-                const bool was = isOccupied(idx, t);
+                Cell& c = occ_map_info_.grid[idx];
 
                 c.log_odds = std::max(
                     c.log_odds + params_.occ_map_params.log_free * count,
@@ -431,12 +416,6 @@ void OccMap::commitFree(Clock t) {
                 c.last_update = t;
 
                 count = 0;
-
-                const bool now = isOccupied(idx, t);
-
-                if (was != now) {
-                    deltas.push_back({ idx, was, now });
-                }
             }
         }
     );

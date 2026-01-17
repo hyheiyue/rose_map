@@ -88,7 +88,7 @@ public:
         if (idx < 0)
             return params_.occ_map_params.unknown_is_occupied;
 
-        const Cell& c = occ_map_info_.grid_[idx];
+        const Cell& c = occ_map_info_.grid[idx];
         if (now - c.last_update > params_.occ_map_params.timeout)
             return false;
 
@@ -97,7 +97,7 @@ public:
 
     void update(Clock now);
     Eigen::Vector3f origin() const {
-        return occ_map_info_.origin_;
+        return occ_map_info_.origin;
     }
     std::vector<Eigen::Vector4f> getOccupiedPoints(float sample_resolution_m = -0.05) const;
 
@@ -165,12 +165,12 @@ public:
         const Policy& policy,
         RayResultSOA& out
     ) {
-        const int min_x = occ_map_info_.min_key_.x;
-        const int min_y = occ_map_info_.min_key_.y;
-        const int min_z = occ_map_info_.min_key_.z;
-        const int max_x = occ_map_info_.max_key_.x;
-        const int max_y = occ_map_info_.max_key_.y;
-        const int max_z = occ_map_info_.max_key_.z;
+        const int min_x = occ_map_info_.min_key.x;
+        const int min_y = occ_map_info_.min_key.y;
+        const int min_z = occ_map_info_.min_key.z;
+        const int max_x = occ_map_info_.max_key.x;
+        const int max_y = occ_map_info_.max_key.y;
+        const int max_z = occ_map_info_.max_key.z;
 
         const float px = o.x + 0.5f;
         const float py = o.y + 0.5f;
@@ -242,97 +242,97 @@ public:
         tbb::enumerable_thread_specific<RayResultSOA>& tls_free
     );
     inline int key3DToIndex3D(const VoxelKey3D& k) const {
-        const int ox = occ_map_info_.origin_key_.x;
-        const int oy = occ_map_info_.origin_key_.y;
-        const int oz = occ_map_info_.origin_key_.z;
-        const int half_x = occ_map_info_.nx_ >> 1;
-        const int half_y = occ_map_info_.ny_ >> 1;
-        const int half_z = occ_map_info_.nz_ >> 1;
+        const int ox = occ_map_info_.origin_key.x;
+        const int oy = occ_map_info_.origin_key.y;
+        const int oz = occ_map_info_.origin_key.z;
+        const int half_x = occ_map_info_.nx >> 1;
+        const int half_y = occ_map_info_.ny >> 1;
+        const int half_z = occ_map_info_.nz >> 1;
 
         int dx = k.x - ox + half_x;
         int dy = k.y - oy + half_y;
         int dz = k.z - oz + half_z;
 
-        if (dx < 0 || dx >= occ_map_info_.nx_ || dy < 0 || dy >= occ_map_info_.ny_ || dz < 0
-            || dz >= occ_map_info_.nz_)
+        if (dx < 0 || dx >= occ_map_info_.nx || dy < 0 || dy >= occ_map_info_.ny || dz < 0
+            || dz >= occ_map_info_.nz)
             return -1;
 
-        int rx = dx + occ_map_info_.ox_;
-        if (rx >= occ_map_info_.nx_)
-            rx -= occ_map_info_.nx_;
+        int rx = dx + occ_map_info_.ox;
+        if (rx >= occ_map_info_.nx)
+            rx -= occ_map_info_.nx;
         else if (rx < 0)
-            rx += occ_map_info_.nx_;
+            rx += occ_map_info_.nx;
 
-        int ry = dy + occ_map_info_.oy_;
-        if (ry >= occ_map_info_.ny_)
-            ry -= occ_map_info_.ny_;
+        int ry = dy + occ_map_info_.oy;
+        if (ry >= occ_map_info_.ny)
+            ry -= occ_map_info_.ny;
         else if (ry < 0)
-            ry += occ_map_info_.ny_;
+            ry += occ_map_info_.ny;
 
-        int rz = dz + occ_map_info_.oz_;
-        if (rz >= occ_map_info_.nz_)
-            rz -= occ_map_info_.nz_;
+        int rz = dz + occ_map_info_.oz;
+        if (rz >= occ_map_info_.nz)
+            rz -= occ_map_info_.nz;
         else if (rz < 0)
-            rz += occ_map_info_.nz_;
+            rz += occ_map_info_.nz;
 
-        return (rx * occ_map_info_.ny_ + ry) * occ_map_info_.nz_ + rz;
+        return (rx * occ_map_info_.ny + ry) * occ_map_info_.nz + rz;
     }
 
     inline VoxelKey3D index3DToKey3D(int idx) const {
-        const int half_x = occ_map_info_.nx_ >> 1;
-        const int half_y = occ_map_info_.ny_ >> 1;
-        const int half_z = occ_map_info_.nz_ >> 1;
+        const int half_x = occ_map_info_.nx >> 1;
+        const int half_y = occ_map_info_.ny >> 1;
+        const int half_z = occ_map_info_.nz >> 1;
 
         int rz = idx;
-        int qxy = rz / occ_map_info_.nz_;
-        rz -= qxy * occ_map_info_.nz_;
+        int qxy = rz / occ_map_info_.nz;
+        rz -= qxy * occ_map_info_.nz;
 
         int ry = qxy;
-        int qx = ry / occ_map_info_.ny_;
-        ry -= qx * occ_map_info_.ny_;
+        int qx = ry / occ_map_info_.ny;
+        ry -= qx * occ_map_info_.ny;
 
         int rx = qx;
 
-        int dx = rx - occ_map_info_.ox_;
+        int dx = rx - occ_map_info_.ox;
         if (dx < 0)
-            dx += occ_map_info_.nx_;
-        else if (dx >= occ_map_info_.nx_)
-            dx -= occ_map_info_.nx_;
+            dx += occ_map_info_.nx;
+        else if (dx >= occ_map_info_.nx)
+            dx -= occ_map_info_.nx;
 
-        int dy = ry - occ_map_info_.oy_;
+        int dy = ry - occ_map_info_.oy;
         if (dy < 0)
-            dy += occ_map_info_.ny_;
-        else if (dy >= occ_map_info_.ny_)
-            dy -= occ_map_info_.ny_;
+            dy += occ_map_info_.ny;
+        else if (dy >= occ_map_info_.ny)
+            dy -= occ_map_info_.ny;
 
-        int dz = rz - occ_map_info_.oz_;
+        int dz = rz - occ_map_info_.oz;
         if (dz < 0)
-            dz += occ_map_info_.nz_;
-        else if (dz >= occ_map_info_.nz_)
-            dz -= occ_map_info_.nz_;
+            dz += occ_map_info_.nz;
+        else if (dz >= occ_map_info_.nz)
+            dz -= occ_map_info_.nz;
 
-        return { occ_map_info_.origin_key_.x + dx - half_x,
-                 occ_map_info_.origin_key_.y + dy - half_y,
-                 occ_map_info_.origin_key_.z + dz - half_z };
+        return { occ_map_info_.origin_key.x + dx - half_x,
+                 occ_map_info_.origin_key.y + dy - half_y,
+                 occ_map_info_.origin_key.z + dz - half_z };
     }
 
     inline VoxelKey3D worldToKey3D(const Eigen::Vector3f& p) const {
-        Eigen::Vector3f q = p / occ_map_info_.voxel_size_;
+        Eigen::Vector3f q = p / occ_map_info_.voxel_size;
         return { int(std::floor(q.x())), int(std::floor(q.y())), int(std::floor(q.z())) };
     }
     inline Eigen::Vector3f key3DToWorld(const VoxelKey3D& k) const {
-        return Eigen::Vector3f(k.x, k.y, k.z) * occ_map_info_.voxel_size_;
+        return Eigen::Vector3f(k.x, k.y, k.z) * occ_map_info_.voxel_size;
     }
     struct OccMapInfo {
-        float voxel_size_;
-        Eigen::Vector3f origin_, size_;
+        float voxel_size;
+        Eigen::Vector3f origin, size;
 
-        int nx_, ny_, nz_;
-        std::vector<Cell> grid_;
+        int nx, ny, nz;
+        std::vector<Cell> grid;
 
-        VoxelKey3D origin_key_;
-        int ox_, oy_, oz_;
-        VoxelKey3D min_key_, max_key_;
+        VoxelKey3D origin_key;
+        int ox, oy, oz;
+        VoxelKey3D min_key, max_key;
     } occ_map_info_;
 
     std::vector<int> occupied_buffer_idx_;
